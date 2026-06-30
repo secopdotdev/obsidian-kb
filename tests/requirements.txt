@@ -1,3 +1,7 @@
 # Test dependencies for the obsidian-kb plugin CI.
+# These mirror the skill scripts' import-time third-party deps — the test
+# suite imports those modules, so CI must install them or collection fails.
 pytest>=8
 PyYAML>=6
+httpx>=0.27   # kb-sync-run.py — Ollama HTTP client (imported at module load)
+click>=8      # kb-sync CLI entrypoints
