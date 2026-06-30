@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "kb-sync scout prose output (Phase B)",
+  "description": "Judgment-only JSON the Haiku prose pass (Phase B) augments into the scout-cache. Structured inventory keys (cli/errors/adrs/identity/docs_present/harvest_counts) are written by kb-harvest.py in Phase A and are NOT present here — never emit them. Mirrors the inline SCOUT_SCHEMA in workflow.js.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "nextsteps", "next_command", "blockers"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "2-4 sentence grounded executive summary: what it is + current state. Never invented."
+    },
+    "nextsteps": {
+      "type": "array",
+      "items": { "type": "string" },
+      "maxItems": 12,
+      "description": "Executive step-by-step plan (3-12 ordered steps) to the project's primary objective. Replaces next_action. [] if none recorded. NEVER invented."
+    },
+    "problem": {
+      "type": ["string", "null"],
+      "description": "The problem statement the project solves. null if not recorded. NEVER invented."
+    },
+    "solution": {
+      "type": ["string", "null"],
+      "description": "How the problem is being solved + why that approach. null if not recorded. NEVER invented."
+    },
+    "objective": {
+      "type": ["string", "null"],
+      "description": "The final deliverable / outcome the project is working toward. null if not recorded. NEVER invented."
+    },
+    "file": {
+      "type": ["string", "null"],
+      "description": "REPO-RELATIVE path to the file needing review/edit to progress. null if none identifiable. NEVER absolute, NEVER invented."
+    },
+    "next_command": {
+      "type": ["string", "null"],
+      "description": "EXACT next command quoted verbatim, ONLY if the repo states one. null otherwise. NEVER invented. Absence is data."
+    },
+    "blockers": {
+      "type": "array",
+      "description": "Explicit blockers/risks/failing-gate notes. [] if none recorded. Never invented.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["slug", "text", "severity"],
+        "properties": {
+          "slug": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$",
+            "description": "Kebab-case, period-free, derived from the blocker's core topic. Stable across syncs, unique within project."
+          },
+          "text": { "type": "string" },
+          "severity": { "type": "string", "enum": ["low", "med", "high", "crit"] },
+          "since": { "type": ["string", "null"] },
+          "unblock": {
+            "type": ["string", "null"],
+            "description": "Concrete removal step harvested from the repo; null if none stated. NEVER invented."
+          }
+        }
+      }
+    },
+    "architecture": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Prose architecture judgment. Omit entirely if nothing useful beyond summary.",
+      "required": ["summary"],
+      "properties": {
+        "summary": { "type": "string", "description": "2-4 sentences: structure, components, substrate, key deps." }
+      }
+    },
+    "reuse_tags": {
+      "type": ["array", "null"],
+      "items": { "type": "string" },
+      "description": "Controlled PERIOD-FREE reuse tags: pattern/*, tool/*, lang/*, capability/* (ADR-0002). 3-8, accurate not generous. null/omit if nothing clearly reusable."
+    },
+    "fallback_cli": {
+      "type": ["array", "null"],
+      "description": "ONLY emitted when kb-harvest.py found NO CLI commands for this repo (flagged in dispatch). Low-confidence. Default: omit this key entirely.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["slug", "command", "invocation"],
+        "properties": {
+          "slug": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "command": { "type": "string" },
+          "invocation": { "type": "string" },
+          "flags": { "type": ["array", "null"], "items": { "type": "string" } },
+          "summary": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "flags": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["color", "note"],
+        "properties": {
+          "color": { "type": "string", "enum": ["red", "yellow", "green"] },
+          "note": { "type": "string" }
+        }
+      }
+    },
+    "injection_findings": {
+      "type": ["array", "null"],
+      "items": { "type": "string" }
+    }
+  }
+}

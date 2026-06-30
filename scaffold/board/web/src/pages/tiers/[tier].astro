@@ -1,0 +1,102 @@
+---
+/**
+ * tiers/[tier].astro — per-tier project list, derived from the content collection
+ * (project cards carry tier/rag-flag/status/next-action/blockers in frontmatter).
+ */
+import Base from '../../layouts/Base.astro';
+import FlagBadge from '../../components/FlagBadge.astro';
+import { getCollection } from 'astro:content';
+
+export async function getStaticPaths() {
+  let allNotes = [];
+  try {
+    allNotes = await getCollection('notes');
+  } catch { /* vault absent at build */ }
+
+  // Concept groups — matches 01-groups/ MOC taxonomy (not the old tier model).
+  const tiers = [
+    { id: '1.0-dev',       label: '🚀 Launchpad'     },
+    { id: '1.1-dev-tools', label: '🛠️ Tool Bay'      },
+    { id: '2.0-career',    label: '📈 Trajectory'    },
+    { id: '3.0-work',       label: '🛰️ Mission Ops'   },
+    { id: '5.0-home',      label: '🏡 Ground Control' },
+  ];
+
+  const cards = allNotes
+    .filter((n) => n.data.type === 'project')
+    .map((p) => ({
+      id: p.id.split('/').pop(),
+      fullId: p.id,
+      title: p.data.title ?? p.id.split('/').pop(),
+      // Read group from frontmatter (set by kb-sync; comes through via .catchall).
+      group: (p.data as Record<string, unknown>)['group'] as string | undefined,
+      'rag-flag': p.data['rag-flag'],
+      status: p.data.status,
+      repo: p.data.repo,
+      'next-action': p.data['next-action'],
+      blockers: Array.isArray(p.data.blockers) ? p.data.blockers : [],
+    }));
+
+  const rank: Record<string, number> = { red: 0, yellow: 1, green: 2 };
+  return tiers.map((tier) => ({
+    params: { tier: tier.id },
+    props: {
+      tier,
+      projects: cards
+        .filter((p) => p.group === tier.id)
+        .sort((a, b) => (rank[a['rag-flag'] ?? ''] ?? 3) - (rank[b['rag-flag'] ?? ''] ?? 3) || (a.id ?? '').localeCompare(b.id ?? '')),
+    },
+  }));
+}
+
+const { tier, projects } = Astro.props;
+
+const redCount    = projects.filter((p) => p['rag-flag'] === 'red').length;
+const yellowCount = projects.filter((p) => p['rag-flag'] === 'yellow').length;
+const greenCount  = projects.filter((p) => p['rag-flag'] === 'green').length;
+---
+
+<Base title={`Tier: ${tier.label}`} description={`Projects in ${tier.label}`}>
+  <main class="layout-content">
+    <h1>{tier.label}</h1>
+
+    <div class="chips-row" style="margin-bottom:1.5rem;">
+      {redCount    > 0 && <span class="flag-badge flag-badge--red">🔴 {redCount} on fire</span>}
+      {yellowCount > 0 && <span class="flag-badge flag-badge--yellow">🟡 {yellowCount} watch</span>}
+      {greenCount  > 0 && <span class="flag-badge flag-badge--green">🟢 {greenCount} green</span>}
+      <span class="chip">{projects.length} projects</span>
+    </div>
+
+    {projects.length === 0 && (
+      <p class="empty-state">No projects found for this tier.</p>
+    )}
+
+    {projects.map((project) => (
+      <div class="project-row">
+        <div>
+          <a href={`/notes/${project.fullId}`} class="project-row-title">{project.title}</a>
+          {project.repo && (
+            <p class="project-row-meta"><span style="font-family:var(--font-mono);">{project.repo}</span></p>
+          )}
+          {project['next-action'] && <p class="project-row-meta">→ {project['next-action']}</p>}
+          {project.blockers.length > 0 && (
+            <p class="project-row-meta" style="color:var(--color-red);">⛔ {project.blockers.join(' · ')}</p>
+          )}
+        </div>
+        <div class="project-row-badges">
+          {project['rag-flag'] && <FlagBadge flag={project['rag-flag']} />}
+          {project.status && <span class={`chip chip--status-${project.status}`}>{project.status}</span>}
+        </div>
+      </div>
+    ))}
+  </main>
+
+  <aside class="layout-rail" aria-label="Tier summary">
+    <p class="section-label">RAG Summary</p>
+    <ul style="list-style:none;padding:0;font-size:0.8125rem;">
+      <li style="margin-bottom:0.25rem;color:var(--color-red);">🔴 {redCount}</li>
+      <li style="margin-bottom:0.25rem;color:var(--color-yellow);">🟡 {yellowCount}</li>
+      <li style="margin-bottom:0.25rem;color:var(--color-green);">🟢 {greenCount}</li>
+    </ul>
+  </aside>
+</Base>

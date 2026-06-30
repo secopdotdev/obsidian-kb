@@ -1,0 +1,9 @@
+{
+  "promptDelete": false,
+  "openBehavior": "",
+  "defaultViewMode": "preview",
+  "showLineNumber": true,
+  "readableLineLength": false,
+  "showInlineTitle": true,
+  "userIgnoreFilters": ["web/"]
+}

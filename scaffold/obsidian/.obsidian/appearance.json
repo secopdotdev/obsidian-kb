@@ -1,0 +1,9 @@
+{
+  "cssTheme": "Encore",
+  "showRibbon": true,
+  "accentColor": "#007a1f",
+  "enabledCssSnippets": [
+    "custom-admonitions.caa53f",
+    "kb"
+  ]
+}

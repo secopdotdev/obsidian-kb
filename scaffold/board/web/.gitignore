@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+.astro/
+
+# Generated at prebuild — not committed (stub {} file is committed)
+src/data/backlinks.json
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Logs
+npm-debug.log*
+
+# Local vault checkout (if using symlink or copy — not a submodule)
+# knowledge-base/

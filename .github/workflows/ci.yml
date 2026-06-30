@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install test deps
+        run: python -m pip install -r tests/requirements.txt
+      - name: Reconciler suite
+        run: python -m pytest tests/reconciler -q
+      - name: kb-sync suite
+        run: python -m pytest tests/kb-sync -q
+
+  node-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Syntax-check hook + workflow scripts
+        run: |
+          for f in hooks/*.js skills/kb-sync/workflow.js; do
+            echo "node --check $f"
+            node --check "$f"
+          done
+
+  manifest-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Validate plugin + marketplace manifests
+        # `claude plugin validate --strict` is the authoritative LOCAL gate; the Claude
+        # Code CLI is not reliably installable in CI, so we assert manifest shape here.
+        run: |
+          python - <<'PY'
+          import json
+          p = json.load(open(".claude-plugin/plugin.json"))
+          assert p.get("name") == "obsidian-kb", "plugin.json name"
+          assert p.get("version"), "plugin.json version"
+          m = json.load(open(".claude-plugin/marketplace.json"))
+          assert m.get("name"), "marketplace name"
+          assert m.get("owner", {}).get("name"), "marketplace owner.name"
+          plugins = m.get("plugins") or []
+          assert any(e.get("name") == "obsidian-kb" and e.get("source") == "." for e in plugins), \
+              "marketplace must list obsidian-kb with source '.'"
+          print("manifests OK")
+          PY

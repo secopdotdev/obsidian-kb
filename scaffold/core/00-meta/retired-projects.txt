@@ -1,0 +1,3 @@
+# retired-projects.txt — explicit prune allowlist for /kb-sync (one project slug per line).
+# EMPTY by default: nothing is pruned. Add a slug here only to have its generated
+# cards/atomics deleted on the next sync. The reconciler `retire` op manages this for you.

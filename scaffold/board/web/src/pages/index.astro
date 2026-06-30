@@ -1,0 +1,1034 @@
+---
+/**
+ * index.astro -- Mission Control cockpit dashboard.
+ *
+ * Fixed-viewport 3-column layout (CockpitLayout):
+ *   kpis slot    -- RAG/BLKR/CYCL/ADRS health chips in header
+ *   controls slot -- left rail: presets, layout dir, color-by, density, edge toggles, stats
+ *   default slot  -- center Cytoscape dependency graph (DependencyGraph)
+ *   panels slot   -- right column: On Fire, Watch, Blockers, Next Move, ADRs, Objective blockers
+ *
+ * Graph interaction driven by custom DOM events dispatched from left rail controls.
+ * CSP: script-src 'self' only; data embedded as JSON island; scripts externalised by Astro/Vite.
+ */
+import CockpitLayout from '../layouts/CockpitLayout.astro';
+import DependencyGraph from '../components/DependencyGraph.astro';
+import type { NodeEnrichment } from '../components/DependencyGraph.astro';
+import { getCollection, type CollectionEntry } from 'astro:content';
+import { loadGraph, filterFlagshipGraph, graphIdToNoteId } from '../lib/graph';
+import type { BlockedByEntry, GraphNode, GraphEdge } from '../lib/graph.ts';
+
+// --------------------------------------------------------------------------
+// Blocker normalisation: cards round-trip blockers as rich objects
+// ({text, severity, since}); some may be bare strings. Collapse to one shape.
+// --------------------------------------------------------------------------
+interface Blocker { text: string; severity: string | null; since: string | null; }
+
+function normBlockers(raw: unknown): Blocker[] {
+  if (!Array.isArray(raw)) return [];
+  const out: Blocker[] = [];
+  for (const b of raw) {
+    if (typeof b === 'string') {
+      out.push({ text: b, severity: null, since: null });
+    } else if (b && typeof b === 'object' && 'text' in b) {
+      const o = b as Record<string, unknown>;
+      out.push({
+        text: String(o.text),
+        severity: o.severity != null ? String(o.severity) : null,
+        since: o.since != null ? String(o.since) : null,
+      });
+    }
+  }
+  return out;
+}
+
+// --------------------------------------------------------------------------
+// 1. Content collection
+// --------------------------------------------------------------------------
+
+let allNotes: CollectionEntry<'notes'>[] = [];
+try {
+  allNotes = await getCollection('notes');
+} catch { /* vault absent -- graceful degrade */ }
+
+const noteIdSet = new Set(allNotes.map((n) => n.id));
+
+// --------------------------------------------------------------------------
+// 2. Graph
+// --------------------------------------------------------------------------
+
+const fullGraph  = loadGraph();
+const subGraph   = filterFlagshipGraph(fullGraph);
+const cycleCount = subGraph.cycleCount;
+
+const nodeLabel = new Map<string, string>(
+  fullGraph.nodes.map((n) => [n.id, n.label])
+);
+
+// --------------------------------------------------------------------------
+// Enrichment join: graph-node-id -> operator card fields (lane/phase/launch).
+// Projects join by graphIdToNoteId; objectives use a small static lane map
+// (they are synthetic obj: nodes with no project card).
+// --------------------------------------------------------------------------
+const noteById = new Map(allNotes.map((n) => [n.id, n]));
+
+// Objective -> lane/phase (obj: nodes feed a flagship end-goal lane).
+const OBJECTIVE_LANE: Record<string, { lane: string; phase: string }> = {
+  'obj:objective-a-goal':     { lane: 'objective-a', phase: 'ship' },
+  'obj:objective-b-goal':     { lane: 'objective-b', phase: 'harden' },
+  'obj:objective-a-milestone': { lane: 'objective-a', phase: 'harden' },
+};
+
+// Gate nodes carry no `advances`; their id prefix names the project they gate,
+// so map by prefix into the owning project's lane (gates sit at the harden column,
+// just before the ship anchor they guard).
+function gateLane(id: string): { lane: string; phase: string } | null {
+  if (id.startsWith('oa-')) return { lane: 'objective-a', phase: 'harden' };
+  if (id.startsWith('ob-')) return { lane: 'objective-b', phase: 'harden' };
+  return null;
+}
+
+// ADR-0006 step 2: the client-side synth-node stopgap is RETIRED. kb-sync now
+// harvests advances/phase and emits every project natively into graph.json, so
+// the flagship subGraph already carries all board nodes and their dependency
+// edges. Verified redundant before removal: all 23 project cards are present as
+// graph.json nodes (synthNodes would be empty), and the only project->project
+// advances edge the stopgap added is already a
+// `requires` edge in graph.json (its guard was already false). A/B: node, lane,
+// and edge sets are identical with the stopgap removed.
+const graphNodes: GraphNode[] = subGraph.nodes;
+const graphEdges: GraphEdge[] = subGraph.edges;
+
+const enrich: Record<string, NodeEnrichment> = {};
+for (const gn of graphNodes) {
+  const note = noteById.get(graphIdToNoteId(gn.id));
+  const objMap = OBJECTIVE_LANE[gn.id];
+  const gateMap = gn.type === 'gate' ? gateLane(gn.id) : null;
+  enrich[gn.id] = {
+    lane:        (note?.data.advances as string | undefined) ?? objMap?.lane ?? gateMap?.lane ?? null,
+    phase:       (note?.data.phase as string | undefined) ?? objMap?.phase ?? gateMap?.phase ?? null,
+    path:        typeof note?.data.path === 'string' ? note.data.path : null,
+    repo:        typeof note?.data.repo === 'string' ? note.data.repo : null,
+    nextCommand: typeof note?.data['next-command'] === 'string' && note.data['next-command'] ? String(note.data['next-command']) : null,
+    nextAction:  typeof note?.data['next-action'] === 'string' ? note.data['next-action']! : null,
+    blockers:    normBlockers(note?.data.blockers),
+    supports:    Array.isArray(note?.data.supports) ? (note.data.supports as string[]) : [],
+    objective:   typeof note?.data.objective === 'string' ? note.data.objective : null,
+    problem:     typeof note?.data.problem === 'string' ? note.data.problem : null,
+    solution:    typeof note?.data.solution === 'string' ? note.data.solution : null,
+    nextsteps:   Array.isArray(note?.data.nextsteps) ? (note.data.nextsteps as string[]) : [],
+    file:        typeof note?.data.file === 'string' ? note.data.file : null,
+    adrs:        Array.isArray(note?.data.adrs) ? (note.data.adrs as string[]) : [],
+    language:    typeof gn.language === 'string' ? gn.language : null,
+  };
+}
+
+const ultimateObjectives = fullGraph.nodes.filter(
+  (n) => n.type === 'objective' && n.kind === 'ultimate'
+);
+
+const objectiveBlockerPanels = ultimateObjectives.map((obj) => ({
+  obj,
+  entries: [...(obj.blocked_by ?? [])].sort(
+    (a: BlockedByEntry, b: BlockedByEntry) =>
+      a.distance - b.distance || a.node.localeCompare(b.node)
+  ),
+}));
+
+// --------------------------------------------------------------------------
+// 3. Helpers
+// --------------------------------------------------------------------------
+
+const staleDays = (d: Date | undefined): number | null =>
+  d ? Math.floor((Date.now() - d.getTime()) / 86_400_000) : null;
+
+const staleClass = (d: Date | undefined): string => {
+  const days = staleDays(d);
+  if (days === null) return '';
+  if (days > 180) return 'stale-red';
+  if (days > 90)  return 'stale-amber';
+  return '';
+};
+
+// --------------------------------------------------------------------------
+// 4. Dashboard rows
+// --------------------------------------------------------------------------
+
+const projectCards = allNotes.filter((n) => n.data.type === 'project');
+
+interface ProjectRow {
+  id:          string;
+  title:       string;
+  rag:         string | undefined;
+  blockers:    Blocker[];
+  nextAction:  string | undefined;
+  nextCommand: string | undefined;
+  group:       string | undefined;
+  updated:     Date | undefined;
+  path:        string | undefined;
+}
+
+const projects: ProjectRow[] = projectCards.map((p) => ({
+  id:          p.id,
+  title:       p.data.title ?? p.id.split('/').pop() ?? p.id,
+  rag:         p.data['rag-flag'],
+  blockers:    normBlockers(p.data.blockers),
+  nextAction:  p.data['next-action'],
+  nextCommand: typeof p.data['next-command'] === 'string' && p.data['next-command'] ? String(p.data['next-command']) : undefined,
+  group:       typeof p.data.group === 'string' ? p.data.group : undefined,
+  updated:     p.data.updated,
+  path:        typeof p.data.path  === 'string' ? p.data.path  : undefined,
+}));
+
+const rank: Record<string, number> = { red: 0, yellow: 1, green: 2 };
+projects.sort(
+  (a, b) => (rank[a.rag ?? ''] ?? 3) - (rank[b.rag ?? ''] ?? 3) || a.title.localeCompare(b.title)
+);
+
+const redProjects    = projects.filter((p) => p.rag === 'red');
+const yellowProjects = projects.filter((p) => p.rag === 'yellow');
+const greenProjects  = projects.filter((p) => p.rag === 'green');
+
+const allBlockers = projects.flatMap((p) =>
+  p.blockers.map((b) => ({ noteId: p.id, title: p.title, blocker: b.text, severity: b.severity, path: p.path }))
+);
+
+const allNextActions = projects
+  .filter((p) => p.nextAction || p.nextCommand)
+  .map((p) => ({ noteId: p.id, title: p.title, action: p.nextAction ?? '', command: p.nextCommand, path: p.path }));
+
+const ts = (d: Date | undefined) => (d ? d.getTime() : 0);
+
+const openAdrs = allNotes
+  .filter((n) => n.data.type === 'adr' && n.data.status === 'proposed')
+  .sort((a, b) => ts(b.data.created) - ts(a.data.created))
+  .slice(0, 15);
+
+// --------------------------------------------------------------------------
+// 5. Health counts
+// --------------------------------------------------------------------------
+
+const healthRed      = redProjects.length;
+const healthYellow   = yellowProjects.length;
+const healthGreen    = greenProjects.length;
+const healthBlockers = allBlockers.length;
+const healthCycles   = cycleCount;
+const healthAdrs     = openAdrs.length;
+
+const noVaultContent = projects.length === 0 && allNotes.length === 0;
+---
+
+<CockpitLayout title="Mission Control">
+
+  <!-- ── KPI chips (header) ───────────────────────────────────────────────── -->
+  <Fragment slot="kpis">
+    <span class:list={['kpi', { 'kpi--red': healthRed > 0 }]}
+          aria-label={`${healthRed} on fire`} title="On Fire">
+      <span class="kpi-l">RED</span><b class="kpi-n">{healthRed}</b>
+    </span>
+    <span class:list={['kpi', { 'kpi--yellow': healthYellow > 0 }]}
+          aria-label={`${healthYellow} watch`} title="Watch">
+      <span class="kpi-l">YLW</span><b class="kpi-n">{healthYellow}</b>
+    </span>
+    <span class:list={['kpi', { 'kpi--green': healthGreen > 0 }]}
+          aria-label={`${healthGreen} on track`} title="On Track">
+      <span class="kpi-l">GRN</span><b class="kpi-n">{healthGreen}</b>
+    </span>
+    <span class="kpi-div" aria-hidden="true"></span>
+    <span class:list={['kpi', { 'kpi--red': healthBlockers > 0 }]}
+          aria-label={`${healthBlockers} blockers`} title="Open blockers">
+      <span class="kpi-l">BLKR</span><b class="kpi-n">{healthBlockers}</b>
+    </span>
+    <span class:list={['kpi', { 'kpi--red': healthCycles > 0 }]}
+          aria-label={`${healthCycles} cycles`} title="Circular dependencies">
+      <span class="kpi-l">CYCL</span><b class="kpi-n">{healthCycles}</b>
+    </span>
+    <span class="kpi-div" aria-hidden="true"></span>
+    <span class="kpi" aria-label={`${healthAdrs} open ADRs`} title="Proposed ADRs">
+      <span class="kpi-l">ADRS</span><b class="kpi-n">{healthAdrs}</b>
+    </span>
+  </Fragment>
+
+  <!-- ── Left rail: graph controls ─────────────────────────────────────────── -->
+  <Fragment slot="controls">
+
+    <p class="ctrl-sec">Presets</p>
+    <div class="ctrl-presets">
+      <button class="ctrl-preset-btn" data-preset="triage"       type="button">Triage</button>
+      <button class="ctrl-preset-btn" data-preset="architecture" type="button">Arch</button>
+      <button class="ctrl-preset-btn" data-preset="blockers"     type="button">Blockers</button>
+      <button class="ctrl-preset-btn" data-preset="adrs"         type="button">ADRs</button>
+    </div>
+
+    <p class="ctrl-sec">Layout</p>
+    <div class="ctrl-radio-grp" role="radiogroup" aria-label="Graph direction">
+      <label class="ctrl-opt"><input type="radio" name="layout-dir" value="LR" checked /> LR</label>
+      <label class="ctrl-opt"><input type="radio" name="layout-dir" value="TB" /> TB</label>
+    </div>
+
+    <p class="ctrl-sec">Color</p>
+    <div class="ctrl-radio-grp" role="radiogroup" aria-label="Node color mode">
+      <label class="ctrl-opt"><input type="radio" name="color-by" value="rag"   checked /> RAG</label>
+      <label class="ctrl-opt"><input type="radio" name="color-by" value="group" /> Group</label>
+      <label class="ctrl-opt"><input type="radio" name="color-by" value="type"  /> Type</label>
+    </div>
+
+    <p class="ctrl-sec">Density</p>
+    <div class="ctrl-radio-grp" role="radiogroup" aria-label="Graph density">
+      <label class="ctrl-opt"><input type="radio" name="density" value="compact" checked /> Compact</label>
+      <label class="ctrl-opt"><input type="radio" name="density" value="normal"  /> Normal</label>
+    </div>
+
+    <p class="ctrl-sec">Edges</p>
+    <div class="ctrl-checks">
+      <label class="ctrl-opt"><input type="checkbox" data-edge-type="requires"   checked /> requires</label>
+      <label class="ctrl-opt"><input type="checkbox" data-edge-type="blocked"    checked /> blocked</label>
+      <label class="ctrl-opt"><input type="checkbox" data-edge-type="advances"   checked /> advances</label>
+      <label class="ctrl-opt"><input type="checkbox" data-edge-type="supersedes" checked /> supersedes</label>
+      <label class="ctrl-opt"><input type="checkbox" data-edge-type="gates"      checked /> gates</label>
+    </div>
+
+    <hr class="ctrl-rule" />
+
+    <p class="ctrl-sec">Graph</p>
+    <dl class="ctrl-stats">
+      <dt>Nodes</dt><dd>{graphNodes.length}</dd>
+      <dt>Edges</dt><dd>{graphEdges.length}</dd>
+      <dt>Cycles</dt><dd class={healthCycles > 0 ? 'stat-red' : ''}>{healthCycles}</dd>
+      <dt>Total</dt><dd>{fullGraph.nodes.length}</dd>
+    </dl>
+
+    <button id="ctrl-reset" class="ctrl-reset-btn" type="button">Reset view</button>
+
+  </Fragment>
+
+  <!-- ── Center: dependency graph (default slot) ───────────────────────────── -->
+  {noVaultContent && (
+    <p class="mc-empty">
+      No vault content. Run from <code>knowledge-base/web/</code> (vault is one
+      level up at <code>..</code>), then run <code>npm run build</code>.
+    </p>
+  )}
+  <DependencyGraph
+    nodes={graphNodes}
+    edges={graphEdges}
+    noteIds={noteIdSet}
+    graphIdToNoteId={graphIdToNoteId}
+    enrich={enrich}
+  />
+
+  <!-- ── Right column: operational panels ─────────────────────────────────── -->
+  <Fragment slot="panels">
+
+    <!-- On Fire (rag: red) -->
+    {redProjects.length > 0 && (
+      <section class="pnl" aria-label="On Fire">
+        <div class="pnl-hdr">
+          <h2 class="pnl-ttl">On Fire</h2>
+          <span class="pnl-cnt pnl-cnt--red">{healthRed}</span>
+        </div>
+        {redProjects.map((p) => {
+          const sc = staleClass(p.updated);
+          return (
+            <div class="pnl-row pnl-row--red">
+              <div class="pnl-row-body">
+                <div class="pnl-row-head">
+                  <!-- Task C: project title is a clickable link -->
+                  <a href={`/notes/${p.id}`} class="pnl-link">{p.title}</a>
+                  {sc && <span class:list={['stale-dot', sc]} title={`Updated ${staleDays(p.updated)}d ago`} aria-hidden="true"></span>}
+                </div>
+                {p.blockers.length > 0 && (
+                  <p class="pnl-desc pnl-desc--blocker">{p.blockers.map((b) => b.text).join(' / ')}</p>
+                )}
+                {p.nextAction && <p class="pnl-desc">{p.nextAction}</p>}
+                {/* Task C: the runnable command in a wrapping code-box with copy button */}
+                {p.nextCommand && (
+                  <div class="pnl-cmd-row">
+                    <code class="pnl-cmd-code">{p.nextCommand}</code>
+                    <button class="mc-copy-btn pnl-cmd-copy" type="button"
+                      data-copy={p.nextCommand}
+                      aria-label={`Copy command for ${p.title}`}>copy</button>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </section>
+    )}
+
+    <!-- Watch (rag: yellow) -->
+    {yellowProjects.length > 0 && (
+      <section class="pnl" aria-label="Watch">
+        <div class="pnl-hdr">
+          <h2 class="pnl-ttl">Watch</h2>
+          <span class="pnl-cnt pnl-cnt--yellow">{healthYellow}</span>
+        </div>
+        {yellowProjects.map((p) => {
+          const sc = staleClass(p.updated);
+          return (
+            <div class="pnl-row pnl-row--yellow">
+              <div class="pnl-row-body">
+                <div class="pnl-row-head">
+                  <a href={`/notes/${p.id}`} class="pnl-link">{p.title}</a>
+                  {sc && <span class:list={['stale-dot', sc]} title={`Updated ${staleDays(p.updated)}d ago`} aria-hidden="true"></span>}
+                </div>
+                {p.nextAction && <p class="pnl-desc">{p.nextAction}</p>}
+                {/* Task C: the runnable command in a wrapping code-box with copy button */}
+                {p.nextCommand && (
+                  <div class="pnl-cmd-row">
+                    <code class="pnl-cmd-code">{p.nextCommand}</code>
+                    <button class="mc-copy-btn pnl-cmd-copy" type="button"
+                      data-copy={p.nextCommand}
+                      aria-label={`Copy command for ${p.title}`}>copy</button>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </section>
+    )}
+
+    <!-- Blocker Board -->
+    {allBlockers.length > 0 && (
+      <section class="pnl" aria-label="Blockers">
+        <div class="pnl-hdr">
+          <h2 class="pnl-ttl">Blockers</h2>
+          <span class="pnl-cnt pnl-cnt--red">{healthBlockers}</span>
+        </div>
+        {allBlockers.map((b) => (
+          <div class="pnl-blk-row">
+            <a href={`/notes/${b.noteId}`} class="pnl-blk-proj">{b.title}</a>
+            <span class="pnl-sep" aria-hidden="true">&gt;</span>
+            <span class="pnl-blk-txt">{b.blocker}</span>
+          </div>
+        ))}
+      </section>
+    )}
+
+    <!-- Next Move (copy-to-clipboard command panel) -->
+    {allNextActions.length > 0 && (
+      <section class="pnl" aria-label="Next Steps">
+        <div class="pnl-hdr">
+          <h2 class="pnl-ttl">Next Move - copy cmd</h2>
+          <span class="pnl-cnt">{allNextActions.length}</span>
+        </div>
+        {allNextActions.map((a) => (
+          <div class="pnl-row pnl-row--green">
+            <div class="pnl-row-body">
+              {/* Task C: project title as clickable link */}
+              <a href={`/notes/${a.noteId}`} class="pnl-link">{a.title}</a>
+              {a.action && <p class="pnl-desc">{a.action}</p>}
+              {/* Task C: runnable command in a wrapping code-box with copy button */}
+              {a.command && (
+                <div class="pnl-cmd-row">
+                  <code class="pnl-cmd-code">{a.command}</code>
+                  <button class="mc-copy-btn pnl-cmd-copy" type="button"
+                    data-copy={a.command}
+                    aria-label={`Copy command for ${a.title}`}>copy</button>
+                </div>
+              )}
+            </div>
+          </div>
+        ))}
+      </section>
+    )}
+
+    <!-- Open ADRs with staleness indicators -->
+    {openAdrs.length > 0 && (
+      <section class="pnl" aria-label="Open ADRs">
+        <div class="pnl-hdr">
+          <h2 class="pnl-ttl">Open ADRs</h2>
+          <span class="pnl-cnt">{healthAdrs}</span>
+        </div>
+        {openAdrs.map((adr) => {
+          const adrDate = adr.data.updated ?? adr.data.created;
+          const sc = staleClass(adrDate);
+          const days = staleDays(adrDate);
+          return (
+            <div class="pnl-row">
+              <div class="pnl-row-head">
+                {sc && <span class:list={['stale-dot', sc]} title={`${days}d old`} aria-hidden="true"></span>}
+                <a href={`/notes/${adr.id}`} class="pnl-link">
+                  {adr.data.title ?? adr.id.split('/').pop() ?? adr.id}
+                </a>
+              </div>
+              {adr.data.project && (
+                <p class="pnl-meta">{String(adr.data.project)}</p>
+              )}
+            </div>
+          );
+        })}
+      </section>
+    )}
+
+    <!-- Objective blockers (per ultimate objective) -->
+    {objectiveBlockerPanels.map(({ obj, entries }) => (
+      <section class="pnl" aria-label={`Blockers: ${obj.label}`}>
+        <div class="pnl-hdr">
+          <h2 class="pnl-ttl">{obj.label}</h2>
+          <span class:list={['pnl-cnt', { 'pnl-cnt--red': entries.length > 0 }]}>{entries.length}</span>
+        </div>
+        {entries.length === 0 ? (
+          <p class="pnl-empty">No upstream blockers</p>
+        ) : (
+          entries.map((entry) => {
+            const srcLabel = nodeLabel.get(entry.node)
+              ?? entry.node.split('/').pop()?.replace(/\.md$/, '')
+              ?? entry.node;
+            return (
+              <div class="pnl-blk-row">
+                <span class="pnl-dist">{entry.distance}</span>
+                <span class="pnl-sep" aria-hidden="true">&gt;</span>
+                <span class="pnl-blk-proj">{srcLabel}</span>
+                {entry.text && (
+                  <Fragment>
+                    <span class="pnl-sep" aria-hidden="true">&gt;</span>
+                    <span class="pnl-blk-txt">{entry.text}</span>
+                  </Fragment>
+                )}
+              </div>
+            );
+          })
+        )}
+      </section>
+    ))}
+
+    <!-- Green (on track, compact list) -->
+    {greenProjects.length > 0 && (
+      <section class="pnl" aria-label="On Track">
+        <div class="pnl-hdr">
+          <h2 class="pnl-ttl">On Track</h2>
+          <span class="pnl-cnt pnl-cnt--green">{healthGreen}</span>
+        </div>
+        <div class="pnl-green-grid">
+          {greenProjects.map((p) => (
+            <a href={`/notes/${p.id}`} class="pnl-green-item">
+              <span class="pnl-green-dot" aria-hidden="true"></span>
+              {p.title}
+            </a>
+          ))}
+        </div>
+      </section>
+    )}
+
+  </Fragment>
+
+</CockpitLayout>
+
+<!-- Controls -> DependencyGraph event bridge (externalized by Vite -> CSP 'self' OK) -->
+<script>
+  // Mirrors PRESETS in DependencyGraph.astro for UI sync when a preset is clicked
+  interface PresetState {
+    dir: string;
+    colorBy: string;
+    compact: boolean;
+    hiddenEdges: string[];
+  }
+
+  const PRESET_STATES: Record<string, PresetState> = {
+    triage:       { dir: 'LR', colorBy: 'rag',  compact: false, hiddenEdges: [] },
+    architecture: { dir: 'LR', colorBy: 'type', compact: false, hiddenEdges: [] },
+    blockers:     { dir: 'LR', colorBy: 'rag',  compact: true,  hiddenEdges: ['supersedes', 'advances', 'requires', 'gates'] },
+    adrs:         { dir: 'LR', colorBy: 'type', compact: false, hiddenEdges: ['requires', 'advances', 'blocked', 'gates'] },
+  };
+
+  const ALL_EDGE_TYPES = ['requires', 'blocked', 'advances', 'supersedes', 'gates'];
+
+  function syncControlsToPreset(name: string) {
+    const state = PRESET_STATES[name];
+    if (!state) return;
+
+    const dirRadio = document.querySelector<HTMLInputElement>(
+      `input[name="layout-dir"][value="${state.dir}"]`
+    );
+    if (dirRadio) dirRadio.checked = true;
+
+    const colorRadio = document.querySelector<HTMLInputElement>(
+      `input[name="color-by"][value="${state.colorBy}"]`
+    );
+    if (colorRadio) colorRadio.checked = true;
+
+    const densityRadio = document.querySelector<HTMLInputElement>(
+      `input[name="density"][value="${state.compact ? 'compact' : 'normal'}"]`
+    );
+    if (densityRadio) densityRadio.checked = true;
+
+    for (const et of ALL_EDGE_TYPES) {
+      const cb = document.querySelector<HTMLInputElement>(`input[data-edge-type="${et}"]`);
+      if (cb) cb.checked = !state.hiddenEdges.includes(et);
+    }
+  }
+
+  // Preset buttons
+  document.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const preset = btn.dataset.preset ?? '';
+      document.dispatchEvent(new CustomEvent('kb-preset', { detail: { preset } }));
+      syncControlsToPreset(preset);
+    });
+  });
+
+  // Layout direction
+  document.querySelectorAll<HTMLInputElement>('input[name="layout-dir"]').forEach((radio) => {
+    radio.addEventListener('change', () => {
+      if (radio.checked) {
+        document.dispatchEvent(new CustomEvent('kb-layout-dir', { detail: { dir: radio.value } }));
+      }
+    });
+  });
+
+  // Color by
+  document.querySelectorAll<HTMLInputElement>('input[name="color-by"]').forEach((radio) => {
+    radio.addEventListener('change', () => {
+      if (radio.checked) {
+        document.dispatchEvent(new CustomEvent('kb-color-by', { detail: { mode: radio.value } }));
+      }
+    });
+  });
+
+  // Density
+  document.querySelectorAll<HTMLInputElement>('input[name="density"]').forEach((radio) => {
+    radio.addEventListener('change', () => {
+      if (radio.checked) {
+        document.dispatchEvent(
+          new CustomEvent('kb-density', { detail: { compact: radio.value === 'compact' } })
+        );
+      }
+    });
+  });
+
+  // Edge type checkboxes
+  document.querySelectorAll<HTMLInputElement>('input[data-edge-type]').forEach((cb) => {
+    cb.addEventListener('change', () => {
+      const type = cb.dataset.edgeType ?? '';
+      document.dispatchEvent(
+        new CustomEvent('kb-edge-toggle', { detail: { type, visible: cb.checked } })
+      );
+    });
+  });
+
+  // Reset
+  document.getElementById('ctrl-reset')?.addEventListener('click', () => {
+    document.dispatchEvent(new CustomEvent('kb-reset'));
+  });
+</script>
+
+<style>
+  /* ── KPI chips (rendered in CockpitLayout header) ──────────────────────── */
+
+  .kpi {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.1em 0.45em;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .kpi-l {
+    font-family: var(--font-mono);
+    font-size: 8px;
+    letter-spacing: 0.1em;
+    color: var(--color-text-dim);
+    text-transform: uppercase;
+    user-select: none;
+  }
+
+  .kpi-n {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    font-weight: 700;
+    color: var(--color-text);
+    min-width: 1ch;
+    line-height: 1;
+  }
+
+  .kpi--red    { border-color: rgba(239, 68, 68,  0.4); }
+  .kpi--red .kpi-n    { color: var(--color-red);    }
+  .kpi--yellow { border-color: rgba(250, 204, 21, 0.4); }
+  .kpi--yellow .kpi-n { color: var(--color-yellow); }
+  .kpi--green  { border-color: rgba(34,  197, 94, 0.4); }
+  .kpi--green .kpi-n  { color: var(--color-green);  }
+
+  .kpi-div {
+    width: 1px;
+    height: 1rem;
+    background: var(--color-border);
+    flex-shrink: 0;
+  }
+
+  /* ── Left rail controls ─────────────────────────────────────────────────── */
+
+  .ctrl-sec {
+    font-family: var(--font-mono);
+    font-size: 8px;
+    letter-spacing: 0.12em;
+    color: var(--color-text-dim);
+    text-transform: uppercase;
+    margin: var(--space-3) 0 var(--space-1);
+    user-select: none;
+  }
+
+  .ctrl-presets {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+
+  .ctrl-preset-btn {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    padding: 0.25em 0.5em;
+    background: var(--color-surface-alt);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    text-align: left;
+    transition: border-color var(--transition), color var(--transition);
+  }
+
+  .ctrl-preset-btn:hover        { border-color: var(--color-accent-dim); color: var(--color-accent); }
+  .ctrl-preset-btn:active       { transform: translateY(1px); }
+  .ctrl-preset-btn:focus-visible { outline: 2px solid var(--color-border-focus); outline-offset: 2px; }
+
+  .ctrl-radio-grp,
+  .ctrl-checks {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+
+  .ctrl-opt {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    user-select: none;
+    line-height: 1.6;
+  }
+
+  .ctrl-opt input {
+    accent-color: var(--color-accent);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .ctrl-rule {
+    border: none;
+    border-top: 1px solid var(--color-border);
+    margin: var(--space-3) 0;
+  }
+
+  .ctrl-stats {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.2rem var(--space-2);
+    font-size: var(--text-xs);
+    margin-bottom: var(--space-3);
+  }
+
+  .ctrl-stats dt {
+    font-family: var(--font-mono);
+    color: var(--color-text-dim);
+  }
+
+  .ctrl-stats dd {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    color: var(--color-text);
+    text-align: right;
+    margin: 0;
+  }
+
+  .stat-red { color: var(--color-red) !important; }
+
+  .ctrl-reset-btn {
+    width: 100%;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    padding: 0.3em 0;
+    background: transparent;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    color: var(--color-text-dim);
+    cursor: pointer;
+    transition: border-color var(--transition), color var(--transition);
+  }
+
+  .ctrl-reset-btn:hover        { border-color: var(--color-accent-dim); color: var(--color-accent); }
+  .ctrl-reset-btn:focus-visible { outline: 2px solid var(--color-border-focus); outline-offset: 2px; }
+
+  /* ── Right panel sections ───────────────────────────────────────────────── */
+
+  .pnl {
+    border-top: 1px solid var(--color-border);
+    padding: var(--space-2) 6px;
+    flex-shrink: 0;
+  }
+
+  .pnl:first-child { border-top: none; }
+
+  .pnl-hdr {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-bottom: var(--space-1);
+    padding: 0 2px;
+  }
+
+  .pnl-ttl {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--color-text-dim);
+    margin: 0;
+    border: none;
+    padding: 0;
+    font-weight: 700;
+    flex: 1;
+  }
+
+  .pnl-cnt {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    font-weight: 700;
+    color: var(--color-text-muted);
+    background: var(--color-surface-alt);
+    border: 1px solid var(--color-border);
+    border-radius: 9999px;
+    padding: 0 0.4em;
+    line-height: 1.5;
+    flex-shrink: 0;
+  }
+
+  .pnl-cnt--red    { color: var(--color-red);    border-color: rgba(239, 68, 68,  0.35); }
+  .pnl-cnt--yellow { color: var(--color-yellow); border-color: rgba(250, 204, 21, 0.35); }
+  .pnl-cnt--green  { color: var(--color-green);  border-color: rgba(34,  197, 94, 0.35); }
+
+  /* ── Panel rows ─────────────────────────────────────────────────────────── */
+
+  .pnl-row {
+    padding: 5px 6px 5px 8px;
+    border-top: 1px solid var(--color-border);
+    /* RAG conveyed by a clean left side-bar, not an inline dot (no text indent). */
+    border-left: 2px solid transparent;
+    cursor: default;
+  }
+
+  .pnl-row:hover { background: #1b2330; }
+  .pnl-row:first-of-type { border-top: none; }
+
+  /* Task C: RAG status as a left side-bar (replaces the indenting inline dot). */
+  .pnl-row--red    { border-left-color: #f0594f; }
+  .pnl-row--yellow { border-left-color: #e3b341; }
+  .pnl-row--green  { border-left-color: #3fb950; }
+
+  .pnl-row-body {
+    min-width: 0;
+  }
+
+  .pnl-row-head {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    min-width: 0;
+  }
+
+  /* Staleness dot */
+  .stale-dot {
+    display: inline-block;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .stale-dot.stale-red   { background: var(--color-red);    }
+  .stale-dot.stale-amber { background: var(--color-yellow); }
+
+  .pnl-link {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text);
+    text-decoration: none;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .pnl-link:hover        { color: var(--color-accent); }
+  .pnl-link:focus-visible { outline: 2px solid var(--color-border-focus); outline-offset: 1px; border-radius: var(--radius-sm); }
+
+  /* Task C: descriptions render IN FULL (wrap, no truncation) so the operator
+     reads the whole next-step / blocker without a click-through. */
+  .pnl-desc {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    margin: 2px 0 0;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .pnl-desc--blocker { color: var(--color-red); }
+
+  .pnl-meta {
+    font-size: var(--text-xs);
+    color: var(--color-text-dim);
+    margin-top: 0.1rem;
+  }
+
+  /* Task C: prototype .cmd code-box row */
+  .pnl-cmd-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    margin-top: 4px;
+  }
+
+  .pnl-cmd-code {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    background: #0a0e14;
+    border: 1px solid #2d3744;
+    border-radius: 4px;
+    padding: 3px 6px;
+    color: #b9c6d6;
+    flex: 1;
+    /* Task C: command shown in full -- wrap rather than ellipsis-truncate. */
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    display: block;
+    min-width: 0;
+  }
+
+  .pnl-cmd-copy {
+    background: #161b22;
+    border: 1px solid #2d3744;
+    color: #8b98a8;
+    border-radius: 4px;
+    padding: 2px 7px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+    transition: color var(--transition), border-color var(--transition);
+  }
+
+  .pnl-cmd-copy:hover { color: var(--color-text); border-color: #58a6ff; }
+  .pnl-cmd-copy:focus-visible { outline: 2px solid var(--color-border-focus); outline-offset: 2px; }
+
+  /* ── Blocker board rows ─────────────────────────────────────────────────── */
+
+  .pnl-blk-row {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+    padding: var(--space-1) 0;
+    border-bottom: 1px solid var(--color-border);
+    font-size: var(--text-xs);
+  }
+
+  .pnl-blk-row:last-child { border-bottom: none; }
+
+  .pnl-blk-proj {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+    text-decoration: none;
+  }
+
+  a.pnl-blk-proj:hover { color: var(--color-accent); }
+
+  .pnl-sep {
+    color: var(--color-border);
+    flex-shrink: 0;
+  }
+
+  .pnl-blk-txt {
+    color: var(--color-text);
+    flex: 1;
+    min-width: 0;
+    word-break: break-word;
+  }
+
+  .pnl-dist {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    color: var(--color-text-dim);
+    min-width: 1.5ch;
+    text-align: right;
+    flex-shrink: 0;
+  }
+
+  /* ── Green grid ─────────────────────────────────────────────────────────── */
+
+  .pnl-green-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+  }
+
+  .pnl-green-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    text-decoration: none;
+    padding: 0.1rem 0;
+    transition: color var(--transition);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .pnl-green-item:hover        { color: var(--color-accent); }
+  .pnl-green-item:focus-visible { outline: 2px solid var(--color-border-focus); border-radius: var(--radius-sm); }
+
+  .pnl-green-dot {
+    display: inline-block;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--color-green);
+    flex-shrink: 0;
+  }
+
+  .pnl-empty {
+    font-size: var(--text-xs);
+    color: var(--color-text-dim);
+    font-style: italic;
+  }
+
+  /* ── Empty state (no vault content) ────────────────────────────────────── */
+
+  .mc-empty {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: var(--text-sm);
+    color: var(--color-text-dim);
+    text-align: center;
+    font-style: italic;
+  }
+</style>

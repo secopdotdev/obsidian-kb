@@ -1,0 +1,105 @@
+---
+/**
+ * TierNav.astro — left sidebar navigation.
+ * Shows top-level tier links and highlights the active path.
+ * Reads from a static manifest of known tiers; falls back to static list
+ * when kb-manifest.json is absent (vault not yet checked out).
+ */
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+export interface Props {
+  currentPath: string;
+}
+
+const { currentPath } = Astro.props;
+
+const __dirname = fileURLToPath(new URL('.', import.meta.url));
+// App embedded at knowledge-base/web/; this file at web/src/components/.
+// Vault root is 3 levels up (components -> src -> web -> repo root). KB_VAULT
+// (a path relative to the build cwd `web/`, e.g. `..`) overrides for Docker/CI.
+const VAULT = process.env.KB_VAULT ?? join(__dirname, '..', '..', '..');
+const MANIFEST_PATH = join(VAULT, '00-meta', 'kb-manifest.json');
+
+interface Tier {
+  id: string;
+  label: string;
+  slug: string;
+}
+
+let tiers: Tier[] = [];
+
+// Try to read tiers from manifest; fall back to static defaults.
+try {
+  if (existsSync(MANIFEST_PATH)) {
+    // kb-manifest.json is a flat array of project objects with shape:
+    // { name, group, classifier, rag, ... }
+    const raw: Record<string, string>[] = JSON.parse(readFileSync(MANIFEST_PATH, 'utf-8'));
+    if (Array.isArray(raw)) {
+      const seen = new Set<string>();
+      for (const p of raw) {
+        if (p.group && !seen.has(p.group)) {
+          seen.add(p.group);
+          tiers.push({ id: p.group, label: p.classifier ?? p.group, slug: p.group });
+        }
+      }
+    }
+  }
+} catch {
+  // Graceful degradation — vault not present or manifest malformed.
+}
+
+// Static fallback — actual concept groups (matches 01-groups/ MOC taxonomy).
+if (tiers.length === 0) {
+  tiers = [
+    { id: '1.0-dev',       label: '🚀 Launchpad',     slug: '1.0-dev'       },
+    { id: '1.1-dev-tools', label: '🛠️ Tool Bay',      slug: '1.1-dev-tools' },
+    { id: '2.0-career',    label: '📈 Trajectory',    slug: '2.0-career'    },
+    { id: '3.0-work',       label: '🛰️ Mission Ops',   slug: '3.0-work'      },
+    { id: '5.0-home',      label: '🏡 Ground Control', slug: '5.0-home'      },
+  ];
+}
+
+const quickLinks = [
+  { label: 'Home',   href: '/' },
+  { label: 'Search', href: '/search' },
+];
+---
+
+<nav class="tier-nav" aria-label="Site navigation">
+  <p class="tier-nav-section-title">Navigation</p>
+  <ul>
+    {quickLinks.map((link) => (
+      <li>
+        <a
+          href={link.href}
+          aria-current={currentPath === link.href ? 'page' : undefined}
+        >{link.label}</a>
+      </li>
+    ))}
+  </ul>
+
+  <p class="tier-nav-section-title">Groups</p>
+  <ul>
+    {tiers.map((tier) => (
+      <li>
+        <a
+          href={`/tiers/${tier.slug}`}
+          aria-current={currentPath.startsWith(`/tiers/${tier.slug}`) ? 'page' : undefined}
+        >{tier.label}</a>
+      </li>
+    ))}
+  </ul>
+
+  <p class="tier-nav-section-title">Browse</p>
+  <ul>
+    <li><a href="/notes/00-meta/_index">Meta</a></li>
+    <li><a href="/notes/01-groups/_index">Groups Index</a></li>
+    <li><a href="/notes/02-projects/_index">Projects</a></li>
+    <li><a href="/notes/03-adr/_index">ADRs</a></li>
+    <li><a href="/notes/04-cli-errors/_index">CLI / Errors</a></li>
+    <li><a href="/notes/05-runbooks/_index">Runbooks</a></li>
+    <li><a href="/notes/06-reference/_index">Reference</a></li>
+  </ul>
+</nav>

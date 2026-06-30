@@ -1,0 +1,6 @@
+{"name":"example-toolkit","group":"3.0-work","head_sha":"60e4d14",
+ "cli":[{"slug":"falcon-rtr-run","command":"falcon-rtr-run","invocation":"python incident-response/falcon-rtr-run.py","flags":[]}],
+ "errors":[{"slug":"aadsts65002","code":"400","message":"AADSTS65002 ...","trigger":"MS first-party app id","fix":"use a custom app registration"}],
+ "adrs":[{"id":"0001","slug":"design-lessons","title":"Design lessons","status":"accepted","date":"2026-06-05","options":[{"name":"OpenBao","pros":"self-host | audited","cons":"ops burden","cost":"med"},{"name":"DPAPI","pros":"zero-dep","cons":"Windows-only","cost":"low"}],"recommendation":"OpenBao"}],
+ "blockers":[{"slug":"credential-purge-gap","text":"keyring RW creds bypass the unlock gate","severity":"med","since":"2026-06-10","unblock":"verify _purge_keyring_rw gate; run tests"}],
+ "docs_present":["architecture.md"],"harvest_counts":{"cli":1,"errors":1,"adrs":1}}

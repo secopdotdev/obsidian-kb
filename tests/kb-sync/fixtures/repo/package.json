@@ -1,0 +1,8 @@
+{
+  "name": "fixturetool",
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "node server.js",
+    "lint": "eslint src/"
+  }
+}

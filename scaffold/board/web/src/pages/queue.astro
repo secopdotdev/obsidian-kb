@@ -1,0 +1,560 @@
+---
+/**
+ * queue.astro — operator triage queue.
+ *
+ * Renders all type:project notes where rag-flag is red/yellow OR next-command
+ * is populated. Sorted red → yellow → green, then most-stale first within each
+ * group (oldest `updated` date). Client-side tier filter chips (no SSR needed).
+ *
+ * No graph, no sidebar — pure mobile-optimized action list.
+ * CSP: script-src 'self' — no inline handlers; scripts externalized by Vite.
+ */
+import { getCollection } from 'astro:content';
+import Base from '../layouts/Base.astro';
+import FlagBadge from '../components/FlagBadge.astro';
+
+const allNotes = await getCollection('notes');
+
+const RAG_ORDER: Record<string, number> = { red: 0, yellow: 1, green: 2 };
+
+interface BlockerObj { text: string; severity?: string; since?: string; unblock?: string }
+
+const SEV_CLASS: Record<string, string> = {
+  crit: 'sev-crit', high: 'sev-high', med: 'sev-med', low: 'sev-low',
+};
+const SEV_LABEL: Record<string, string> = {
+  crit: 'CRIT', high: 'HIGH', med: 'MED', low: 'LOW',
+};
+const PHASE_CLASS: Record<string, string> = {
+  seed: 'phase-seed', build: 'phase-build', harden: 'phase-harden', ship: 'phase-ship',
+};
+
+// Filter: project type, and either flagged red/yellow OR has a runnable command.
+const projects = allNotes
+  .filter((n) => {
+    const d = n.data;
+    if (d.type !== 'project') return false;
+    const flag = d['rag-flag'];
+    const cmd = d['next-command'];
+    return flag === 'red' || flag === 'yellow' || Boolean(cmd?.trim());
+  })
+  .sort((a, b) => {
+    // Primary: rag order (red first)
+    const fa = RAG_ORDER[a.data['rag-flag'] ?? 'green'] ?? 2;
+    const fb = RAG_ORDER[b.data['rag-flag'] ?? 'green'] ?? 2;
+    if (fa !== fb) return fa - fb;
+    // Secondary: most stale (oldest updated) first; undefined → pushed to end
+    const ua = a.data.updated?.getTime() ?? Infinity;
+    const ub = b.data.updated?.getTime() ?? Infinity;
+    return ua - ub;
+  });
+
+// Tier chips — only show when >1 tier present.
+const allTiers = [
+  ...new Set(
+    projects
+      .map((p) => p.data.tier)
+      .filter((t): t is string => Boolean(t)),
+  ),
+].sort();
+
+function blockerList(note: (typeof projects)[0]): BlockerObj[] {
+  const raw = note.data.blockers ?? [];
+  return raw
+    .map((b) => (typeof b === 'string' ? { text: b } : b as BlockerObj))
+    .filter((b) => Boolean(b.text));
+}
+
+function primaryAction(note: (typeof projects)[0]): string | undefined {
+  const na = note.data['next-action'];
+  if (na) return na;
+  return (note.data.nextsteps ?? [])[0];
+}
+
+const redCount    = projects.filter((p) => p.data['rag-flag'] === 'red').length;
+const yellowCount = projects.filter((p) => p.data['rag-flag'] === 'yellow').length;
+const greenCount  = projects.filter((p) => !['red', 'yellow'].includes(p.data['rag-flag'] ?? '')).length;
+const total       = projects.length;
+---
+
+<Base title="Queue" description="Operator action queue — triage and next steps">
+  <main class="layout-content queue-main" aria-label="Operator action queue">
+
+    <!-- Queue header -->
+    <div class="q-header">
+      <h1 class="q-title">Queue</h1>
+      <div class="q-kpi" aria-label="RAG status counts">
+        {redCount    > 0 && <span class="kpi kpi-red"   ><span class="kpi-dot" aria-hidden="true">●</span>{redCount} on fire</span>}
+        {yellowCount > 0 && <span class="kpi kpi-yellow"><span class="kpi-dot" aria-hidden="true">●</span>{yellowCount} watch</span>}
+        {greenCount  > 0 && <span class="kpi kpi-green" ><span class="kpi-dot" aria-hidden="true">●</span>{greenCount} actionable</span>}
+        <span class="kpi kpi-total">{total} total</span>
+      </div>
+    </div>
+
+    <!-- Tier filter chips (client-side; only rendered when >1 tier) -->
+    {allTiers.length > 1 && (
+      <div class="q-filters" role="group" aria-label="Filter by tier">
+        <button class="q-chip q-chip--active" type="button" data-tier-filter="all">All</button>
+        {allTiers.map((t) => (
+          <button class="q-chip" type="button" data-tier-filter={t}>{t}</button>
+        ))}
+      </div>
+    )}
+
+    <!-- Queue list -->
+    {projects.length === 0 ? (
+      <p class="q-empty">
+        Queue is empty — all projects on track and no next-command pending.
+      </p>
+    ) : (
+      <ol class="q-list">
+        {projects.map((note) => {
+          const flag      = note.data['rag-flag'];
+          const blockers  = blockerList(note);
+          const action    = primaryAction(note);
+          const cmd       = note.data['next-command'];
+          const cmdShell  = note.data['next-command-shell'] as string | undefined;
+          const tier      = note.data.tier;
+          const phase     = note.data.phase as string | undefined;
+          const advances  = note.data.advances as string | undefined;
+          const isStale   = Boolean(note.data.stale);
+          const repoUrl   = note.data.repo;
+          const title     = note.data.title ?? note.id.split('/').pop() ?? note.id;
+          const noteUrl   = `/notes/${note.id}`;
+          const updatedAt = note.data.updated;
+
+          return (
+            <li class="q-card" data-rag={flag ?? ''} data-tier={tier ?? ''}>
+
+              <div class="qc-header">
+                <a href={noteUrl} class="qc-title">{title}</a>
+                <div class="qc-badges">
+                  {flag && <FlagBadge flag={flag} />}
+                  {phase && <span class={`qc-phase ${PHASE_CLASS[phase] ?? ''}`}>{phase}</span>}
+                  {isStale && <span class="qc-stale">STALE</span>}
+                  {tier && <span class="qc-tier">{tier}</span>}
+                </div>
+              </div>
+
+              {advances && <p class="qc-advances">{advances}</p>}
+
+              {blockers.length > 0 && (
+                <ul class="qc-blockers" aria-label="Blockers">
+                  {blockers.map((b) => (
+                    <li class="qc-blocker">
+                      {b.severity && (
+                        <span class={`badge-sev-sm ${SEV_CLASS[b.severity] ?? 'sev-low'}`}>
+                          {SEV_LABEL[b.severity] ?? b.severity.toUpperCase()}
+                        </span>
+                      )}
+                      {b.text}
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              {action && <p class="qc-action">{action}</p>}
+
+              {cmd && (
+                <div class="qc-cmd-row">
+                  {cmdShell && (
+                    <span class={`qc-shell-badge shell-${cmdShell}`}>{cmdShell.toUpperCase()}</span>
+                  )}
+                  <code class="qc-cmd">{cmd}</code>
+                  <button
+                    class="qc-copy-btn"
+                    type="button"
+                    data-copy-cmd={cmd}
+                    aria-label={`Copy command for ${title}`}
+                  >copy</button>
+                </div>
+              )}
+
+              {(repoUrl || updatedAt) && (
+                <div class="qc-foot">
+                  {repoUrl && (
+                    <a href={repoUrl} class="qc-repo-link" target="_blank" rel="noopener noreferrer">↗ repo</a>
+                  )}
+                  {updatedAt && (
+                    <time class="qc-updated" datetime={updatedAt.toISOString()}>
+                      {updatedAt.toISOString().slice(0, 10)}
+                    </time>
+                  )}
+                </div>
+              )}
+
+            </li>
+          );
+        })}
+      </ol>
+    )}
+  </main>
+</Base>
+
+<!--
+  Scripts externalized by Vite — satisfies CSP script-src 'self'.
+  1. Copy-to-clipboard for .qc-copy-btn (uses data-copy-cmd, distinct from cockpit's data-copy).
+  2. Tier filter chips for client-side show/hide.
+-->
+<script>
+  // ── Copy to clipboard ────────────────────────────────────────────────────────
+  document.querySelectorAll<HTMLButtonElement>('[data-copy-cmd]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const text = btn.dataset.copyCmd ?? '';
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+        const orig = btn.textContent ?? 'copy';
+        btn.textContent = 'copied!';
+        btn.classList.add('qc-copy-btn--done');
+        setTimeout(() => {
+          btn.textContent = orig;
+          btn.classList.remove('qc-copy-btn--done');
+        }, 2000);
+      } catch { /* clipboard unavailable — silent */ }
+    });
+  });
+
+  // ── Tier filter chips ─────────────────────────────────────────────────────────
+  const chips = document.querySelectorAll<HTMLButtonElement>('[data-tier-filter]');
+  const cards = document.querySelectorAll<HTMLLIElement>('.q-card');
+
+  chips.forEach((chip) => {
+    chip.addEventListener('click', () => {
+      const tier = chip.dataset.tierFilter ?? 'all';
+
+      chips.forEach((c) => c.classList.remove('q-chip--active'));
+      chip.classList.add('q-chip--active');
+
+      cards.forEach((card) => {
+        card.hidden = !(tier === 'all' || card.dataset.tier === tier);
+      });
+    });
+  });
+</script>
+
+<style>
+  /* ── Queue shell ─────────────────────────────────────────────────────────── */
+
+  .queue-main {
+    /* Triage list — use the content column; wider max-width than note pages */
+    max-width: 56rem;
+    padding: var(--space-6) var(--space-4);
+  }
+
+  /* ── Header + KPI row ───────────────────────────────────────────────────── */
+
+  .q-header {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-4);
+    flex-wrap: wrap;
+    margin-bottom: var(--space-4);
+    border-bottom: 1px solid var(--color-border);
+    padding-bottom: var(--space-3);
+  }
+
+  .q-title {
+    font-size: var(--text-2xl);
+    font-weight: 700;
+    margin: 0;
+    color: var(--color-text);
+  }
+
+  .q-kpi {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+  }
+
+  .kpi {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
+
+  .kpi-dot { font-size: 8px; }
+  .kpi-red    { color: var(--color-red); }
+  .kpi-yellow { color: var(--color-yellow); }
+  .kpi-green  { color: var(--color-green); }
+  .kpi-total  { color: var(--color-text-dim); }
+
+  /* ── Tier filter chips ──────────────────────────────────────────────────── */
+
+  .q-filters {
+    display: flex;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    margin-bottom: var(--space-4);
+  }
+
+  .q-chip {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    padding: 3px 10px;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    transition: color var(--transition), border-color var(--transition), background var(--transition);
+  }
+
+  .q-chip:hover         { color: var(--color-text); border-color: var(--color-accent-dim); }
+  .q-chip:focus-visible { outline: 2px solid var(--color-border-focus); outline-offset: 2px; }
+  .q-chip--active       { color: var(--color-accent); border-color: var(--color-accent-dim); background: var(--color-accent-glow); }
+
+  /* ── Queue list ─────────────────────────────────────────────────────────── */
+
+  .q-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .q-empty {
+    color: var(--color-text-dim);
+    font-size: var(--text-sm);
+    font-style: italic;
+    margin-top: var(--space-6);
+    text-align: center;
+  }
+
+  /* ── Queue card ─────────────────────────────────────────────────────────── */
+
+  .q-card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-3) var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    transition: border-color var(--transition);
+  }
+
+  .q-card:hover { border-color: var(--color-border-focus); }
+
+  /* RAG left-border accent */
+  .q-card[data-rag="red"]    { border-left: 3px solid var(--color-red); }
+  .q-card[data-rag="yellow"] { border-left: 3px solid var(--color-yellow); }
+  .q-card[data-rag="green"]  { border-left: 3px solid var(--color-green); }
+
+  /* Card header: title + badges */
+  .qc-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+  }
+
+  .qc-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    text-decoration: none;
+    transition: color var(--transition);
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .qc-title:hover        { color: var(--color-link-hover); }
+  .qc-title:focus-visible { outline: 2px solid var(--color-border-focus); border-radius: var(--radius-sm); }
+
+  .qc-badges {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-shrink: 0;
+  }
+
+  .qc-tier {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.08em;
+    color: var(--color-text-dim);
+    white-space: nowrap;
+  }
+
+  /* Blockers */
+  .qc-blockers {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    border-left: 2px solid var(--color-red);
+    padding-left: var(--space-3);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .qc-blocker {
+    font-size: var(--text-xs);
+    color: var(--color-red);
+    line-height: 1.5;
+    margin: 0;
+  }
+
+  /* Action text */
+  .qc-action {
+    margin: 0;
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    line-height: 1.5;
+  }
+
+  /* Command row */
+  .qc-cmd-row {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+  }
+
+  .qc-cmd {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    background: #0a0e14;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    padding: 4px 8px;
+    color: var(--color-accent);
+    flex: 1;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    display: block;
+    min-width: 0;
+    line-height: 1.5;
+  }
+
+  .qc-copy-btn {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 3px 8px;
+    background: var(--color-surface-alt);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+    transition: color var(--transition), border-color var(--transition);
+    margin-top: 2px;
+  }
+
+  .qc-copy-btn:hover         { color: var(--color-text); border-color: var(--color-accent-dim); }
+  .qc-copy-btn:focus-visible  { outline: 2px solid var(--color-border-focus); outline-offset: 2px; }
+  .qc-copy-btn--done         { color: var(--color-green) !important; border-color: rgba(34, 197, 94, 0.4) !important; }
+
+  /* Footer: repo link + stale date */
+  .qc-foot {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+    padding-top: var(--space-2);
+    border-top: 1px solid var(--color-border);
+  }
+
+  .qc-repo-link {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-link);
+    text-decoration: none;
+    transition: color var(--transition);
+  }
+
+  .qc-repo-link:hover         { color: var(--color-link-hover); }
+  .qc-repo-link:focus-visible  { outline: 2px solid var(--color-border-focus); border-radius: var(--radius-sm); }
+
+  .qc-updated {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-dim);
+    margin-left: auto;
+  }
+
+  /* ── Phase / stale / advances ────────────────────────────────────────────── */
+
+  .qc-phase {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    border: 1px solid transparent;
+  }
+  .phase-seed   { color: #94a3b8; border-color: #475569; background: #1e293b; }
+  .phase-build  { color: #60a5fa; border-color: #1d4ed8; background: #1e3a5f; }
+  .phase-harden { color: #fbbf24; border-color: #92400e; background: #1c1a0a; }
+  .phase-ship   { color: #4ade80; border-color: #166534; background: #0a1a10; }
+
+  .qc-stale {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.08em;
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    color: var(--color-yellow);
+    border: 1px solid rgba(250, 204, 21, 0.35);
+    background: rgba(250, 204, 21, 0.06);
+  }
+
+  .qc-advances {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--color-text-dim);
+    letter-spacing: 0.06em;
+  }
+
+  /* ── Severity badges (compact) ────────────────────────────────────────────── */
+
+  .badge-sev-sm {
+    font-family: var(--font-mono);
+    font-size: 8px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    padding: 1px 5px;
+    border-radius: var(--radius-sm);
+    border: 1px solid transparent;
+    flex-shrink: 0;
+    white-space: nowrap;
+    margin-right: var(--space-1);
+  }
+  .sev-crit { color: #fca5a5; background: #450a0a; border-color: #dc2626; }
+  .sev-high { color: #fdba74; background: #431407; border-color: #ea580c; }
+  .sev-med  { color: #fde68a; background: #422006; border-color: #ca8a04; }
+  .sev-low  { color: var(--color-text-dim); background: var(--color-surface-alt); border-color: var(--color-border); }
+
+  /* ── Shell badge ─────────────────────────────────────────────────────────── */
+
+  .qc-shell-badge {
+    font-family: var(--font-mono);
+    font-size: 8px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    padding: 2px 5px;
+    border-radius: var(--radius-sm);
+    border: 1px solid transparent;
+    white-space: nowrap;
+    flex-shrink: 0;
+    align-self: flex-start;
+    margin-top: 3px;
+  }
+  .shell-bash { color: #86efac; background: #052e16; border-color: #166534; }
+  .shell-ps1  { color: #93c5fd; background: #1e3a5f; border-color: #1d4ed8; }
+  .shell-ssh  { color: #d8b4fe; background: #2e1065; border-color: #7c3aed; }
+</style>

@@ -1,0 +1,3 @@
+# reconcile/ledger.yaml — append-only KB lifecycle ledger (rename/relocate/retire/absorb).
+# Empty seed: a comment-only file loads as zero ops. The reconciler appends ops here.
+# Never hand-edit op history — use `reconciler record <op>` then `apply --commit`.

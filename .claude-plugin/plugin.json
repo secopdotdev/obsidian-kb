@@ -1,0 +1,22 @@
+{
+  "name": "obsidian-kb",
+  "displayName": "Obsidian KB",
+  "version": "0.1.0",
+  "description": "Knowledge-base toolkit for Claude Code: harvests repo metadata into a markdown+SQLite vault, renders an Obsidian graph and an Astro board, and ships reconciler + lifecycle skills. Requires Python 3.13+ and Node 24+.",
+  "author": {
+    "name": "secopdotdev",
+    "url": "https://github.com/secopdotdev"
+  },
+  "homepage": "https://github.com/secopdotdev/obsidian-kb",
+  "repository": "https://github.com/secopdotdev/obsidian-kb",
+  "license": "MIT",
+  "keywords": [
+    "knowledge-base",
+    "obsidian",
+    "kb",
+    "agent",
+    "documentation",
+    "mission-control"
+  ],
+  "hooks": "./hooks/hooks.json"
+}

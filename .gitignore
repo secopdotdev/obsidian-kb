@@ -1,0 +1,49 @@
+# Python
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node / Astro (board) — bundled as SOURCE only
+**/node_modules/
+**/dist/
+**/.astro/
+
+# Secrets / credentials — never commit
+*.env
+.env
+.env.local
+.env.production
+*.key
+*.pem
+*.pfx
+secrets/
+.secrets/
+
+# Local build artifacts (NOT part of the published plugin)
+docs/BUILD-AUDIT.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
+
+# Generated KB artifacts — belong in the private knowledge-base vault, not here
+00-meta/kb.sqlite
+00-meta/kb.sqlite-wal
+00-meta/kb.sqlite-shm
+00-meta/graph.json
+00-meta/scout-cache/
+
+# obsidian-wiki shadow-index artifacts (blocked from being recreated)
+/index.md
+/log.md
+/hot.md
+/.manifest.json
+/projects/

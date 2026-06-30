@@ -1,0 +1,47 @@
+---
+/**
+ * notes/[...id].astro — renders a single KB note.
+ *
+ * Uses getStaticPaths() over the 'notes' collection.
+ * Each entry uses note.id (Astro 6 Content Layer API).
+ * render(note) returns { Content, headings }.
+ *
+ * Pagefind indexing:
+ * - <main data-pagefind-body> declared in Note.astro layout.
+ * - data-pagefind-filter spans for type and tags.
+ * - data-pagefind-meta="title:<title>" on the wrapper.
+ */
+import { getCollection, render } from 'astro:content';
+import NoteLayout from '../../layouts/Note.astro';
+
+export async function getStaticPaths() {
+  let notes: Awaited<ReturnType<typeof getCollection<'notes'>>> = [];
+  try {
+    notes = await getCollection('notes');
+  } catch {
+    // Vault absent — build produces no note pages (graceful).
+  }
+
+  return notes.map((note) => ({
+    params: { id: note.id },
+    props: { note },
+  }));
+}
+
+const { note } = Astro.props;
+
+const { Content, headings } = await render(note);
+
+const title = (note.data.title as string | undefined) ?? note.id.split('/').pop() ?? note.id;
+const description = `${title} · ${(note.data.type as string | undefined) ?? 'note'} in the knowledge base`;
+---
+
+<NoteLayout
+  title={title}
+  description={description}
+  frontmatter={note.data as Record<string, unknown>}
+  headings={headings}
+  noteId={note.id}
+>
+  <Content />
+</NoteLayout>

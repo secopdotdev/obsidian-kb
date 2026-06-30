@@ -1,0 +1,89 @@
+/* ============================================================================
+   kb.css — Knowledge Base "Mission Control" theme
+   GENERATED/owned by the KB. Pairs with Style Settings (headings below).
+   Targets Obsidian 1.12 reading + live-preview. Edgy, high-contrast, scannable.
+   ============================================================================ */
+
+/* @settings
+name: KB Mission Control
+id: kb-mission-control
+settings:
+  -
+    id: kb-accent
+    title: Accent (cyan)
+    type: variable-themed-color
+    format: hex
+    default-light: '#0b7285'
+    default-dark: '#22d3ee'
+*/
+
+:root {
+  --kb-accent: #22d3ee;
+  --kb-red: #ef4444;     --kb-red-bg: rgba(239,68,68,.14);
+  --kb-yellow: #f59e0b;  --kb-yellow-bg: rgba(245,158,11,.14);
+  --kb-green: #22c55e;   --kb-green-bg: rgba(34,197,94,.14);
+  /* Mission Control group hues */
+  --kb-launchpad: #f97316;     /* 🚀 dev */
+  --kb-toolbay: #a855f7;       /* 🛠️ dev-tools */
+  --kb-trajectory: #3b82f6;    /* 📈 career */
+  --kb-missionops: #22d3ee;    /* 🛰️ work */
+  --kb-groundcontrol: #84cc16; /* 🏡 home */
+}
+
+/* ---- Tag pills: base ---- */
+.markdown-rendered a.tag,
+.metadata-property[data-property-key="tags"] .multi-select-pill {
+  border-radius: 6px;
+  font-size: .72em;
+  font-weight: 600;
+  letter-spacing: .02em;
+  padding: 1px 7px;
+  border: 1px solid transparent;
+}
+
+/* ---- Group classifier tags: Mission Control hues + emoji ---- */
+a.tag[href="#group/launchpad"]     { color: var(--kb-launchpad);     background: rgba(249,115,22,.13); border-color: rgba(249,115,22,.4); }
+a.tag[href="#group/toolbay"]       { color: var(--kb-toolbay);       background: rgba(168,85,247,.13); border-color: rgba(168,85,247,.4); }
+a.tag[href="#group/trajectory"]    { color: var(--kb-trajectory);    background: rgba(59,130,246,.13); border-color: rgba(59,130,246,.4); }
+a.tag[href="#group/missionops"]    { color: var(--kb-missionops);    background: rgba(34,211,238,.13); border-color: rgba(34,211,238,.4); }
+a.tag[href="#group/groundcontrol"] { color: var(--kb-groundcontrol); background: rgba(132,204,22,.13); border-color: rgba(132,204,22,.4); }
+a.tag[href="#group/launchpad"]::before     { content: "🚀 "; }
+a.tag[href="#group/toolbay"]::before       { content: "🛠️ "; }
+a.tag[href="#group/trajectory"]::before    { content: "📈 "; }
+a.tag[href="#group/missionops"]::before    { content: "🛰️ "; }
+a.tag[href="#group/groundcontrol"]::before { content: "🏡 "; }
+
+/* ---- Reuse-map tags: subtle, namespaced color coding ---- */
+a.tag[href^="#pattern/"]    { color: #c084fc; background: rgba(192,132,252,.10); }
+a.tag[href^="#tool/"]       { color: #38bdf8; background: rgba(56,189,248,.10); }
+a.tag[href^="#lang/"]       { color: #34d399; background: rgba(52,211,153,.10); }
+a.tag[href^="#capability/"] { color: #fbbf24; background: rgba(251,191,36,.10); }
+
+/* ---- RAG badge in Properties (rag-flag) ---- */
+.metadata-property[data-property-key="rag-flag"] .metadata-input-longtext,
+.metadata-property[data-property-key="blocker-severity"] .metadata-input-longtext {
+  font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
+}
+
+/* ---- Callouts: sharpen the executive-card sections ---- */
+.callout { border-radius: 8px; border-left-width: 4px; }
+.callout[data-callout="abstract"] { --callout-color: 34, 211, 238; border-left-color: var(--kb-accent); }
+.callout[data-callout="todo"] {
+  --callout-color: 59, 130, 246;
+  background: linear-gradient(180deg, rgba(59,130,246,.10), transparent);
+}
+.callout[data-callout="warning"],
+.callout[data-callout="danger"],
+.callout[data-callout="bug"] { --callout-color: 239, 68, 68; }
+
+/* ---- Executive-card body emoji headers: tighten ---- */
+.markdown-rendered h2 { border-bottom: 1px solid var(--background-modifier-border); padding-bottom: .15em; }
+
+/* ---- Blocker / severity table: monospace severity column pop ---- */
+.markdown-rendered table td:nth-child(2) { font-variant: small-caps; font-weight: 600; }
+
+/* ---- Home / MOC dashboard polish: tighter Bases tables ---- */
+.markdown-rendered .block-language-base table { font-size: .86em; }
+
+/* ---- Inline code (commands) edgier ---- */
+.markdown-rendered code { background: rgba(34,211,238,.08); border: 1px solid rgba(34,211,238,.15); border-radius: 4px; }

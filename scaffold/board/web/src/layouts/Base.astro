@@ -1,0 +1,72 @@
+---
+/**
+ * Base.astro — outer HTML shell.
+ * No inline event handlers; CSP-safe (script-src 'self').
+ * Pagefind JS loaded via a regular <script> (Astro externalizes to /_astro/*.js).
+ */
+import TierNav from '../components/TierNav.astro';
+import '../styles/global.css';
+
+export interface Props {
+  title: string;
+  description?: string;
+}
+
+const { title, description = 'Knowledge base · operator view' } = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content={description} />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>{title} · mission-control</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!--
+      Pagefind UI CSS is loaded here. The @pagefind/default-ui package ships its
+      own CSS that uses CSS custom properties we override in global.css.
+      We import it directly from node_modules via Astro asset processing.
+    -->
+    <link rel="stylesheet" href="/pagefind/pagefind-ui.css" />
+  </head>
+  <body>
+    <div class="layout-shell">
+      <!-- ===== Header ===== -->
+      <header class="layout-header" role="banner">
+        <a href="/" class="site-title" aria-label="Knowledge Base Home">
+          <span aria-hidden="true">⬡</span> kb/
+        </a>
+        <div class="header-search" role="search" aria-label="Site search">
+          <a href="/search" class="search-input" aria-label="Open search">
+            <span>Search notes…</span>
+            <kbd aria-label="forward slash shortcut">/</kbd>
+          </a>
+        </div>
+        <nav aria-label="Primary navigation">
+          <a href="/search">Search</a>
+          <a href="/tiers/1.0-dev">Groups</a>
+          <a href="/queue">Queue</a>
+        </nav>
+      </header>
+
+      <!-- ===== Left sidebar ===== -->
+      <aside class="layout-sidebar" aria-label="Tier navigation">
+        <TierNav currentPath={Astro.url.pathname} />
+      </aside>
+
+      <!-- ===== Main slot ===== -->
+      <slot />
+
+      <!-- ===== Footer ===== -->
+      <footer class="layout-footer" role="contentinfo">
+        <span>mission-control · static build</span>
+        <span aria-hidden="true">·</span>
+        <a href="/search">Search</a>
+        <span aria-hidden="true">·</span>
+        <a href="/">Home</a>
+      </footer>
+    </div>
+  </body>
+</html>

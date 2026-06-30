@@ -1,0 +1,58 @@
+# middleware.yaml — Traefik securityHeaders Middleware for mission-control
+#
+# TRAEFIK VERSION DETECTION:
+#   Default apiVersion below is `traefik.io/v1alpha1` (Traefik v3, k3s >= 1.27).
+#   If your cluster runs Traefik v2, change the apiVersion:
+#     kubectl get crd ingressroutes.traefik.io     # exists → v3 (use traefik.io/v1alpha1)
+#     kubectl get crd ingressroutes.traefik.containo.us  # exists → v2
+#   sed command to switch to v2:
+#     sed -i 's|traefik.io/v1alpha1|traefik.containo.us/v1alpha1|g' k8s/middleware.yaml k8s/ingressroute.yaml
+#   The middleware body (spec.middlewares.headers) is structurally identical between v2 and v3.
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: mission-control-security-headers
+  namespace: mission-control
+spec:
+  headers:
+    # HSTS — 2 years, includeSubDomains, preload
+    stsSeconds: 63072000
+    stsIncludeSubdomains: true
+    stsPreload: true
+
+    # X-Frame-Options: DENY
+    frameDeny: true
+
+    # X-Content-Type-Options: nosniff
+    contentTypeNosniff: true
+
+    # Referrer-Policy
+    referrerPolicy: "strict-origin-when-cross-origin"
+
+    # X-Robots-Tag — internal knowledge base; do not index
+    customResponseHeaders:
+      X-Robots-Tag: "noindex, nofollow"
+
+    # Content-Security-Policy
+    # Notes:
+    #   - script-src 'self': Astro externalizes all scripts to /_astro/*.js (served from self).
+    #   - style-src 'unsafe-inline': Required by Pagefind UI and its dynamic style injection.
+    #     Pagefind injects <style> elements at runtime; cannot be removed without forking Pagefind.
+    #   - worker-src 'self' blob: : Required for Pagefind's Web Worker (blob: URL on some engines).
+    #   - wasm-unsafe-eval: MAY be required by Pagefind WASM on Chromium/Firefox.
+    #     VERIFY: Open DevTools Console after deployment and check for CSP violations.
+    #     If "Refused to compile or instantiate WebAssembly module" appears, uncomment:
+    #       script-src 'self' 'wasm-unsafe-eval'
+    #     Currently included preemptively; remove after browser-gate confirmation (Gate 5).
+    contentSecurityPolicy: >-
+      default-src 'self';
+      script-src 'self' 'wasm-unsafe-eval';
+      style-src 'self' 'unsafe-inline';
+      img-src 'self' data:;
+      font-src 'self';
+      connect-src 'self';
+      worker-src 'self' blob:;
+      frame-ancestors 'none';
+      base-uri 'self';
+      form-action 'none'

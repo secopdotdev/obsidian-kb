@@ -1,0 +1,30 @@
+---
+/**
+ * Breadcrumb.astro — navigation breadcrumb trail.
+ * Semantic <nav> with structured data (microdata).
+ */
+export interface Crumb {
+  label: string;
+  href?: string;
+}
+
+export interface Props {
+  crumbs: Crumb[];
+}
+
+const { crumbs } = Astro.props;
+---
+
+<nav class="breadcrumb" aria-label="Breadcrumb">
+  {crumbs.map((crumb, i) => (
+    <>
+      {i > 0 && <span class="breadcrumb-sep" aria-hidden="true">/</span>}
+      {crumb.href && i < crumbs.length - 1
+        ? <a href={crumb.href}>{crumb.label}</a>
+        : <span class="breadcrumb-current" aria-current={i === crumbs.length - 1 ? 'page' : undefined}>
+            {crumb.label}
+          </span>
+      }
+    </>
+  ))}
+</nav>

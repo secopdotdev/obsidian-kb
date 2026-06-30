@@ -1,0 +1,37 @@
+# ingressroute.yaml — Traefik IngressRoute for mission-control
+#
+# TRAEFIK VERSION DETECTION:
+#   Default apiVersion below is `traefik.io/v1alpha1` (Traefik v3, k3s >= 1.27).
+#   If your cluster runs Traefik v2:
+#     kubectl get crd ingressroutes.traefik.io     # exists → v3
+#     kubectl get crd ingressroutes.traefik.containo.us  # exists → v2
+#   Switch to v2:
+#     sed -i 's|traefik.io/v1alpha1|traefik.containo.us/v1alpha1|g' k8s/middleware.yaml k8s/ingressroute.yaml
+#   The spec structure below is identical for both v2 and v3.
+#
+# DOMAIN: Replace `kb.local` with your actual ingress domain.
+#         For local k3d validation: /etc/hosts → 127.0.0.1 kb.local
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: mission-control
+  namespace: mission-control
+  labels:
+    app.kubernetes.io/name: mission-control
+spec:
+  entryPoints:
+    - websecure   # HTTPS (443)
+  routes:
+    - match: Host(`kb.local`)  # REPLACE with your domain
+      kind: Rule
+      services:
+        - name: mission-control
+          port: 80
+      middlewares:
+        - name: mission-control-security-headers
+  # TLS — Traefik manages cert via Let's Encrypt or cluster cert-manager.
+  # For local k3d testing with self-signed cert, remove the tls.certResolver
+  # line and use `--insecure` / `-k` in curl.
+  tls:
+    certResolver: letsencrypt   # REPLACE or remove for local self-signed

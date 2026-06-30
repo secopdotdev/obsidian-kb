@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mission-control
+  namespace: mission-control
+  labels:
+    app.kubernetes.io/name: mission-control
+    app.kubernetes.io/component: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mission-control
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mission-control
+        app.kubernetes.io/component: web
+    spec:
+      # Deny service account token automount — not needed.
+      automountServiceAccountToken: false
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101       # nginx-unprivileged default user
+        runAsGroup: 101
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: mission-control
+          # Pin to digest at deploy time:
+          # docker pull nginxinc/nginx-unprivileged:1.27-alpine
+          # docker inspect ... --format '{{index .RepoDigests 0}}'
+          image: mission-control:dev  # replace with registry/mission-control:<tag>@sha256:<digest>
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+              name: http
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 101
+            capabilities:
+              drop:
+                - ALL
+
+          resources:
+            requests:
+              cpu:    50m
+              memory: 64Mi
+            limits:
+              cpu:    200m
+              memory: 128Mi
+
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 30
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            failureThreshold: 3
+
+          volumeMounts:
+            # nginx-unprivileged needs writable /tmp, /var/cache/nginx, /var/run
+            # when readOnlyRootFilesystem: true.
+            - name: tmp
+              mountPath: /tmp
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-run
+              mountPath: /var/run
+
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}

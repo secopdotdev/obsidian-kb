@@ -1,0 +1,1033 @@
+---
+/**
+ * DependencyGraph.astro -- client-side Cytoscape swim-lane dependency board.
+ *
+ * Layout: end-goal swim lanes. Time/maturity flows left (seed) -> right (ship,
+ * the end-goal anchor). Each flagship end-goal owns one horizontal lane; unaligned
+ * projects land in an "Unaligned" lane. Lanes are explicit-width locked background
+ * rectangles (NOT compound parents) so every band is uniform width --
+ * see plan 00-spec.md section 4.
+ *
+ * All operator detail (next step, blockers, launch commands) renders INLINE on
+ * node tap; no navigation to /notes is required to read it.
+ *
+ * Controls driven by custom DOM events from the left rail:
+ *   kb-color-by    { mode: 'rag' | 'group' | 'type' }
+ *   kb-density     { compact: boolean }
+ *   kb-edge-toggle { type: string; visible: boolean }
+ *   kb-preset      { preset: 'triage' | 'architecture' | 'blockers' | 'adrs' }
+ *   kb-reset       {}
+ *   kb-layout-dir  { dir }  -- accepted but lane layout is fixed; just re-fits.
+ *
+ * CSP: script-src 'self' only. Data embedded as JSON island; client script
+ * externalised by Astro to /_astro/*.js (allowed by 'self').
+ */
+import type { GraphNode, GraphEdge } from '../lib/graph.ts';
+
+/** Per-node enrichment joined from the content collection (operator-owned card fields). */
+export interface NodeEnrichment {
+  lane: string | null;        // end-goal lane key, 'shared', or null -> Unaligned
+  phase: string | null;       // 'seed' | 'build' | 'harden' | 'ship'
+  path: string | null;        // absolute local working dir (verified on disk)
+  repo: string | null;        // browser-open URL
+  nextCommand: string | null; // copy-paste terminal command
+  nextAction: string | null;  // operator next-step prose
+  blockers: Array<{ text: string; severity: string | null; since: string | null }>;
+  supports: string[];         // for shared utilities: lanes served
+  objective: string | null;   // executive one-liner; null when absent
+  problem: string | null;     // problem statement; null when absent
+  solution: string | null;    // solution summary; null when absent
+  nextsteps: string[];        // full ordered step list (3-12); empty when absent
+  file: string | null;        // repo-relative path for file-target launcher
+  adrs: string[];             // ADR references; empty when absent
+  language: string | null;    // sourced from GraphNode.language (graph.json), not the content collection
+}
+
+export interface Props {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  noteIds: Set<string>;
+  graphIdToNoteId: (id: string) => string;
+  /** graph-node-id -> enrichment. Missing entries fall back to graph.json fields. */
+  enrich: Record<string, NodeEnrichment>;
+}
+
+const { nodes, edges, noteIds, graphIdToNoteId, enrich } = Astro.props;
+
+interface ClientNode {
+  id: string;
+  label: string;
+  type: string | null;
+  kind: string | null;
+  rag: string | null;
+  group: string | null;
+  goal: boolean;
+  cycleId: string | null;
+  href: string | null;
+  lane: string | null;
+  phase: string | null;
+  localPath: string | null;
+  repo: string | null;
+  nextCommand: string | null;
+  nextAction: string | null;
+  blockers: Array<{ text: string; severity: string | null; since: string | null }>;
+  supports: string[];
+  objective: string | null;
+  problem: string | null;
+  solution: string | null;
+  nextsteps: string[];
+  file: string | null;
+  adrs: string[];
+  language: string | null;
+}
+
+interface ClientEdge { s: string; d: string; t: string; cycle: boolean; brk: boolean; }
+interface ClientGraph { nodes: ClientNode[]; edges: ClientEdge[]; }
+
+const EMPTY_ENRICH: NodeEnrichment = {
+  lane: null, phase: null, path: null, repo: null,
+  nextCommand: null, nextAction: null, blockers: [], supports: [],
+  objective: null, problem: null, solution: null, nextsteps: [],
+  file: null, adrs: [], language: null,
+};
+
+const clientGraph: ClientGraph = {
+  nodes: nodes.map((n) => {
+    const noteId   = graphIdToNoteId(n.id);
+    const routable = noteIds.has(noteId);
+    const e        = enrich[n.id] ?? EMPTY_ENRICH;
+    return {
+      id:          n.id,
+      label:       n.label,
+      type:        n.type,
+      kind:        n.kind ?? null,
+      rag:         n.rag,
+      group:       n.group ?? null,
+      goal:        n.goal,
+      cycleId:     n.cycle_id,
+      href:        routable ? `/notes/${noteId}` : null,
+      lane:        e.lane,
+      phase:       e.phase,
+      localPath:   e.path,
+      repo:        e.repo,
+      nextCommand: e.nextCommand,
+      nextAction:  e.nextAction ?? n.next ?? null,
+      blockers:    e.blockers,
+      supports:    e.supports,
+      objective:   e.objective,
+      problem:     e.problem,
+      solution:    e.solution,
+      nextsteps:   e.nextsteps,
+      file:        e.file,
+      adrs:        e.adrs,
+      language:    e.language,
+    };
+  }),
+  edges: edges.map((e) => ({ s: e.s, d: e.d, t: e.t, cycle: e.cycle, brk: e.brk })),
+};
+
+const isEmpty = nodes.length === 0;
+---
+
+<section class="dep-graph-section" aria-label="End-goal swim-lane dependency board">
+  <!-- Task A: legend at top of graph section (above canvas), matching prototype position -->
+  {!isEmpty && (
+    <div class="dg-legend" id="dg-legend" aria-hidden="true">
+      <span class="dg-legend-item"><span class="dg-lk dg-lk--requires"></span>requires</span>
+      <span class="dg-legend-item"><span class="dg-lk dg-lk--blocked"></span>blocked-by</span>
+      <span class="dg-legend-item"><span class="dg-lk dg-lk--supersedes"></span>supersedes</span>
+      <span class="dg-legend-item"><span class="dg-lk dg-lk--partof"></span>part-of</span>
+      <span class="dg-legend-item"><span class="dg-lk dg-lk--cycle"></span>cycle</span>
+      <span class="dg-legend-item"><span class="dg-lk dg-lk--advances"></span>advances</span>
+      <span class="dg-legend-status" id="dg-legend-status">color = RAG · layout = LR · click a node to focus its chain</span>
+    </div>
+  )}
+
+  {isEmpty ? (
+    <p class="dg-empty">
+      No graph data. Run kb-sync to generate
+      <code>00-meta/graph.json</code>, then rebuild.
+    </p>
+  ) : (
+    <div id="dg-container" class="dg-canvas" role="img" aria-label="Swim-lane dependency board" tabindex="0">
+      <div class="dg-loading" aria-live="polite">Loading board...</div>
+    </div>
+  )}
+
+  <!-- Node detail: inline operator panel (next step mapped to blockers + launch bar) -->
+  <aside id="dg-detail" class="dg-detail" aria-live="polite" aria-label="Operator detail" hidden>
+    <button id="dg-detail-close" class="dg-btn dg-detail-close" type="button" aria-label="Close detail">×</button>
+
+    <!-- Task B: node name is a clickable link at the top (title = link when routable) -->
+    <a id="dg-detail-title-link" class="dg-detail-title-link" href="#" hidden></a>
+    <p id="dg-detail-label" class="dg-detail-label"></p>
+    <p id="dg-detail-meta"  class="dg-detail-meta"></p>
+
+    <p id="dg-detail-cycle" class="dg-detail-cycle" hidden>
+      <span aria-hidden="true">(cycle)</span> Circular dependency: chicken-or-egg
+    </p>
+
+    <!-- Task B: Launch links moved to TOP (above next-step/blockers) -->
+    <div id="dg-detail-launch" class="dg-detail-launch" hidden>
+      <p class="dg-detail-h">Launch</p>
+      <div class="dg-launch-row">
+        <a id="dg-launch-code" class="dg-btn dg-launch-btn" hidden
+          aria-label="Open project in VS Code">
+          <svg class="dg-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 8l-4 4l4 4"/><path d="M17 8l4 4l-4 4"/><path d="M14 4l-4 16"/></svg>
+          <span>VS Code</span></a>
+        <a id="dg-launch-repo" class="dg-btn dg-launch-btn" target="_blank" rel="noopener noreferrer" hidden
+          aria-label="Open repository in browser">
+          <svg class="dg-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6h-6a2 2 0 0 0 -2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-6"/><path d="M11 13l9 -9"/><path d="M15 4h5v5"/></svg>
+          <span>Browser</span></a>
+        <button id="dg-launch-cd" class="mc-copy-btn dg-btn dg-launch-btn" type="button" hidden
+          aria-label="Copy cd plus operator command for terminal">
+          <svg class="dg-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 7l5 5l-5 5"/><path d="M12 19l7 0"/></svg>
+          <span>Terminal</span></button>
+        <a id="dg-launch-file" class="dg-btn dg-launch-btn" hidden
+          aria-label="Open specific file in VS Code">
+          <svg class="dg-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2z"/></svg>
+          <span>Open file</span></a>
+      </div>
+      <p id="dg-launch-hint" class="dg-launch-hint" hidden></p>
+    </div>
+
+    <div id="dg-detail-objective-wrap" class="dg-detail-block" hidden>
+      <p class="dg-detail-h">Objective</p>
+      <p id="dg-detail-objective" class="dg-detail-prose"></p>
+    </div>
+
+    <div id="dg-detail-problem-wrap" class="dg-detail-block" hidden>
+      <p id="dg-detail-problem-head" class="dg-detail-h" hidden>Problem</p>
+      <p id="dg-detail-problem" class="dg-detail-prose" hidden></p>
+      <p id="dg-detail-solution-head" class="dg-detail-h dg-detail-h--sub" hidden>Solution</p>
+      <p id="dg-detail-solution" class="dg-detail-prose" hidden></p>
+    </div>
+
+    <div id="dg-detail-nextsteps-wrap" class="dg-detail-block" hidden>
+      <p class="dg-detail-h">Next steps</p>
+      <ol id="dg-detail-nextsteps-list" class="dg-detail-steps-list"></ol>
+    </div>
+
+    <div id="dg-detail-adrs-wrap" class="dg-detail-block" hidden>
+      <p class="dg-detail-h">ADRs</p>
+      <ul id="dg-detail-adrs-list" class="dg-detail-adrs-list"></ul>
+    </div>
+
+    <div id="dg-detail-next-wrap" class="dg-detail-block" hidden>
+      <p class="dg-detail-h">Operator next step</p>
+      <p id="dg-detail-next" class="dg-detail-next"></p>
+    </div>
+
+    <div id="dg-detail-blk-wrap" class="dg-detail-block" hidden>
+      <p class="dg-detail-h">Blockers <span id="dg-detail-blk-count" class="dg-detail-count"></span></p>
+      <ul id="dg-detail-blk-list" class="dg-detail-blk-list"></ul>
+    </div>
+
+    <div id="dg-detail-supports-wrap" class="dg-detail-block" hidden>
+      <p class="dg-detail-h">Supports lanes</p>
+      <p id="dg-detail-supports" class="dg-detail-supports"></p>
+    </div>
+  </aside>
+
+  <!-- legend moved to top of section (see above) -->
+
+  <!-- Accessible fallback -->
+  {!isEmpty && (
+    <details class="dg-fallback">
+      <summary class="dg-fallback-toggle">Node list (accessible fallback)</summary>
+      <ul class="dg-fallback-list">
+        {nodes.map((n) => {
+          const noteId   = graphIdToNoteId(n.id);
+          const routable = noteIds.has(noteId);
+          return (
+            <li>
+              {routable ? <a href={`/notes/${noteId}`}>{n.label}</a> : <span>{n.label}</span>}
+              {n.type && <span class="chip chip--type">{n.type}</span>}
+              {n.rag  && <span class={`flag-badge flag-badge--${n.rag}`}>{n.rag}</span>}
+            </li>
+          );
+        })}
+      </ul>
+    </details>
+  )}
+</section>
+
+<!-- Graph data island: NOT executable, CSP-safe -->
+<script type="application/json" id="kb-graph-data"
+  set:html={JSON.stringify(clientGraph).replace(/</g, '\\u003c')}></script>
+
+<style>
+  .dep-graph-section { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; margin: 0; }
+
+  .dg-canvas {
+    flex: 1; min-height: 0; width: 100%;
+    /* Task A: dot-grid background matching prototype */
+    background:
+      radial-gradient(circle at 1px 1px, #1a2230 1px, transparent 0) 0 0 / 22px 22px,
+      #0d1117;
+    position: relative; overflow: hidden;
+  }
+  .dg-canvas:focus-visible { outline: 2px solid var(--color-border-focus); outline-offset: -2px; }
+
+  .dg-loading {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: var(--color-text-dim); font-family: var(--font-mono); font-size: var(--text-sm);
+  }
+  .dg-empty {
+    color: var(--color-text-dim); font-style: italic; font-size: var(--text-sm);
+    padding: var(--space-4); border: 1px solid var(--color-border);
+    border-radius: var(--radius); margin: var(--space-4);
+  }
+
+  /* Inline operator detail panel: top-right overlay, scrollable */
+  .dg-detail {
+    position: absolute; top: var(--space-3); right: var(--space-3);
+    width: 260px; max-height: calc(100% - var(--space-6)); overflow-y: auto;
+    z-index: 20; padding: var(--space-3);
+    background: var(--color-surface); border: 1px solid var(--color-border);
+    border-radius: var(--radius); box-shadow: var(--shadow);
+  }
+  .dg-detail-close { position: absolute; top: var(--space-2); right: var(--space-2); line-height: 1; }
+
+  /* Task B: clickable node-name title link at top of panel */
+  .dg-detail-title-link {
+    display: block;
+    font-family: var(--font-mono); font-weight: 700; font-size: var(--text-sm);
+    color: var(--color-accent); text-decoration: none;
+    padding-right: var(--space-6); margin-bottom: 0.1rem;
+    word-break: break-word; transition: color var(--transition);
+  }
+  .dg-detail-title-link:hover { color: var(--color-link-hover); text-decoration: underline; }
+
+  /* Fallback label (shown when no href) */
+  .dg-detail-label {
+    font-family: var(--font-mono); font-weight: 700; font-size: var(--text-sm);
+    margin-bottom: 0.15rem; color: var(--color-text); padding-right: var(--space-6);
+    word-break: break-word;
+  }
+  .dg-detail-meta { font-size: var(--text-xs); color: var(--color-text-muted); font-family: var(--font-mono); margin-bottom: var(--space-2); }
+
+  .dg-detail-block { border-top: 1px solid var(--color-border); padding-top: var(--space-2); margin-top: var(--space-2); }
+  .dg-detail-h {
+    font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--color-text-dim); font-weight: 700; margin-bottom: var(--space-1);
+  }
+  .dg-detail-count { color: var(--color-red); }
+
+  .dg-detail-next { font-size: var(--text-xs); color: var(--color-text); line-height: 1.5; word-break: break-word; }
+  .dg-detail-supports { font-size: var(--text-xs); color: var(--color-accent); font-family: var(--font-mono); line-height: 1.5; word-break: break-word; }
+
+  /* Prose fields: objective / problem / solution -- wrap fully, no truncation */
+  .dg-detail-prose {
+    font-size: var(--text-xs); color: var(--color-text); line-height: 1.5;
+    white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+  }
+  /* Sub-heading within a block (e.g. Solution inside Problem block) */
+  .dg-detail-h--sub { margin-top: var(--space-2); }
+
+  /* Ordered next-steps list */
+  .dg-detail-steps-list {
+    margin: 0; padding-left: 1.4em;
+    font-size: var(--text-xs); color: var(--color-text); line-height: 1.5;
+  }
+  .dg-detail-steps-list li { margin-bottom: 0.25em; word-break: break-word; overflow-wrap: anywhere; }
+
+  /* ADR reference list */
+  .dg-detail-adrs-list {
+    list-style: none; margin: 0; padding: 0;
+    font-size: var(--text-xs); color: var(--color-text-muted); font-family: var(--font-mono);
+    line-height: 1.5;
+  }
+  .dg-detail-adrs-list li { padding: 0.1em 0; word-break: break-word; overflow-wrap: anywhere; }
+
+  .dg-detail-blk-list { list-style: none; padding: 0; margin: 0; }
+  .dg-detail-blk-list li {
+    font-size: var(--text-xs); line-height: 1.45; color: var(--color-text-muted);
+    padding: 0.25rem 0; border-bottom: 1px solid var(--color-border); display: flex; gap: 0.4rem;
+  }
+  .dg-detail-blk-list li:last-child { border-bottom: none; }
+  .dg-blk-sev {
+    font-family: var(--font-mono); font-size: 8px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.06em; flex-shrink: 0; padding-top: 0.15rem; min-width: 2.6em;
+  }
+  .dg-blk-sev--crit { color: var(--color-red); }
+  .dg-blk-sev--high { color: var(--color-red); opacity: 0.85; }
+  .dg-blk-sev--med  { color: var(--color-yellow); }
+  .dg-blk-sev--low  { color: var(--color-text-dim); }
+  .dg-blk-txt { flex: 1; min-width: 0; word-break: break-word; }
+
+  .dg-detail-launch { border-top: 1px solid var(--color-border); padding-top: var(--space-2); margin-top: var(--space-2); }
+  .dg-launch-row { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+  .dg-launch-btn { text-decoration: none; display: inline-flex; align-items: center; gap: 0.3em; }
+  .dg-ico { width: 12px; height: 12px; flex-shrink: 0; }
+  .dg-launch-hint { font-family: var(--font-mono); font-size: 9px; color: var(--color-text-dim); margin-top: 0.3rem; word-break: break-all; }
+
+  /* dg-detail-link removed -- replaced by dg-detail-title-link (Task B) */
+
+  .dg-detail-cycle { font-size: var(--text-xs); color: var(--color-red); margin-top: var(--space-1); font-weight: 700; }
+
+  /* Task A: Edge legend -- modern connecting-line style matching prototype.
+     Placed as a flex row ABOVE the canvas (not absolute-positioned) so it
+     always appears between the health header and the graph. */
+  .dg-legend {
+    display: flex; gap: 14px; flex-wrap: wrap;
+    padding: 5px 12px;
+    border-bottom: 1px solid #222a35;
+    background: #11161d;
+    font-size: 10.5px; color: #8b98a8;
+    align-items: center;
+    flex-shrink: 0;
+    z-index: 10;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+  .dg-legend-item { display: inline-flex; align-items: center; gap: 5px; font-family: var(--font-mono); font-size: 10px; color: #8b98a8; }
+  /* Prototype .lk: an 18px line segment rendered as border-top */
+  .dg-lk { width: 18px; height: 0; border-top-width: 2px; border-top-style: solid; display: inline-block; }
+  .dg-lk--requires   { border-top-color: #7d8da3; border-top-style: solid; }
+  .dg-lk--blocked    { border-top-color: #f0594f; border-top-style: solid; border-top-width: 2.6px; }
+  .dg-lk--supersedes { border-top-color: #d2a8ff; border-top-style: dashed; }
+  .dg-lk--partof     { border-top-color: #3a4656; border-top-style: dotted; }
+  .dg-lk--cycle      { border-top-color: #f0594f; border-top-style: dashed; }
+  .dg-lk--advances   { border-top-color: #8b5cf6; border-top-style: solid; }
+  .dg-legend-status  { margin-left: auto; font-family: var(--font-mono); font-size: 9.5px; color: #8b98a8; }
+
+  .dg-fallback { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+  .dg-btn {
+    font-family: var(--font-mono); font-size: var(--text-xs); padding: 0.2em 0.5em;
+    background: var(--color-surface-alt); border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm); color: var(--color-text-muted); cursor: pointer;
+    transition: border-color var(--transition), color var(--transition);
+  }
+  .dg-btn:hover { border-color: var(--color-accent-dim); color: var(--color-accent); }
+  .dg-btn:focus-visible { outline: 2px solid var(--color-border-focus); outline-offset: 2px; }
+</style>
+
+<!-- Client-side renderer (Astro externalizes to /_astro/*.js -> CSP 'self' allows it) -->
+<script>
+  interface CBlocker { text: string; severity: string | null; since: string | null; }
+  interface CNode {
+    id: string; label: string; type: string | null; kind: string | null;
+    rag: string | null; group: string | null; goal: boolean; cycleId: string | null;
+    href: string | null; lane: string | null; phase: string | null;
+    localPath: string | null; repo: string | null; nextCommand: string | null;
+    nextAction: string | null; blockers: CBlocker[]; supports: string[];
+    objective: string | null; problem: string | null; solution: string | null;
+    nextsteps: string[]; file: string | null; adrs: string[]; language: string | null;
+  }
+  interface CEdge { s: string; d: string; t: string; cycle: boolean; brk: boolean; }
+
+  (async () => {
+    const dataEl    = document.getElementById('kb-graph-data');
+    const container = document.getElementById('dg-container') as HTMLElement | null;
+    if (!dataEl || !container) return;
+
+    let graphData: { nodes: CNode[]; edges: CEdge[] };
+    try {
+      graphData = JSON.parse(dataEl.textContent ?? '{}');
+    } catch {
+      container.innerHTML = '<div style="padding:1rem;color:var(--color-red)">Graph data parse error</div>';
+      return;
+    }
+    if (!graphData.nodes?.length) {
+      container.innerHTML = '<div class="dg-loading">No nodes in filtered graph</div>';
+      return;
+    }
+
+    const [{ default: cytoscape }] = await Promise.all([import('cytoscape')]);
+
+    // ---- palettes (Task A: match prototype token values) ----
+    const RAG_COLORS: Record<string, string> = { red: '#f0594f', yellow: '#e3b341', green: '#3fb950' };
+    const GROUP_COLORS: Record<string, string> = {
+      '1.0-dev': '#58a6ff', '1.1-dev-tools': '#3fb950', '2.0-career': '#d2a8ff',
+      '3.0-work': '#e3b341', '5.0-home': '#f0594f',
+    };
+    const TYPE_COLORS: Record<string, string> = {
+      project: '#58a6ff', objective: '#8b5cf6', gate: '#f97316', goal: '#3fb950',
+    };
+    const COLOR_DEFAULT = '#58a6ff';
+    const COLOR_TEXT = '#e6edf3';
+    // Panel fill color for nodes (prototype --panel)
+    const NODE_FILL = '#161b22';
+    const NODE_BORDER = '#222a35';
+
+    // ---- swim-lane geometry ----
+    const LANE_ORDER = ['objective-a', 'objective-b', 'career', 'home', 'shared'];
+    const LANE_LABEL: Record<string, string> = {
+      'objective-a': 'Objective A  ·  primary end-goal',
+      'objective-b': 'Objective B  ·  secondary end-goal',
+      career:        'career  ·  professional development',
+      home:          'home  ·  personal + household',
+      shared:        'shared dev tooling  ·  serves every lane',
+      Unaligned:     'unaligned',
+    };
+    const PHASES = ['seed', 'build', 'harden', 'ship'];
+    const UNALIGNED = 'Unaligned';
+
+    const laneOf = (n: CNode): string => (n.lane && LANE_ORDER.includes(n.lane) ? n.lane : UNALIGNED);
+    const phaseRankOf = (n: CNode): number => {
+      const idx = n.phase ? PHASES.indexOf(n.phase) : -1;
+      if (idx >= 0) return idx;
+      return n.goal ? PHASES.length - 1 : 0; // unphased goal -> ship column, else seed
+    };
+
+    // Which lanes are actually present (Unaligned only if non-empty).
+    const present = new Set(graphData.nodes.map(laneOf));
+
+    // Spacing invariants so nodes NEVER overlap (node is 132w x 40h):
+    //   subW  >= node width + gap   (sub-column horizontal pitch)
+    //   colW  >= subCols * subW     (so the next phase column clears this cell)
+    //   gapY  >= node height + gap  (stacked-row vertical pitch)
+    let density = { colW: 300, gapY: 52, nodeY0: 46, headerPad: 56, subW: 148, subCols: 2, vlaneW: 150 };
+
+    function nodeEl(n: CNode, x: number, y: number, isShip: boolean): cytoscape.ElementDefinition {
+      const ragColor   = n.rag ? RAG_COLORS[n.rag] ?? COLOR_DEFAULT : COLOR_DEFAULT;
+      const groupColor = n.group ? GROUP_COLORS[n.group] ?? COLOR_DEFAULT : COLOR_DEFAULT;
+      const typeColor  = n.type ? TYPE_COLORS[n.type] ?? COLOR_DEFAULT : COLOR_DEFAULT;
+      // Task A: initial spine color = RAG (default colorBy)
+      const spineColor = ragColor;
+      // Two-line internal label: name on line 1, subject (type [· kind]) on line 2.
+      // Cytoscape honors \n with text-wrap:wrap (single color, per spec) -- the prototype's
+      // node-label + node-sub pair. Two distinct COLORS in one label is what is unsupported.
+      const subject = [n.type, n.kind, n.language].filter(Boolean).join(' · ') || 'note';
+      return {
+        group: 'nodes',
+        data: {
+          id: n.id, label: n.label, type: n.type ?? '', kind: n.kind ?? '',
+          twoline: `${n.label}\n${subject}`,
+          rag: n.rag ?? '', group: n.group ?? '', goal: n.goal,
+          cycleId: n.cycleId ?? '', href: n.href ?? '',
+          nextAction: n.nextAction ?? '', localPath: n.localPath ?? '',
+          repo: n.repo ?? '', nextCommand: n.nextCommand ?? '',
+          blockers: n.blockers ?? [], supports: n.supports ?? [],
+          objective: n.objective ?? '', problem: n.problem ?? '',
+          solution: n.solution ?? '', nextsteps: n.nextsteps ?? [],
+          file: n.file ?? '', adrs: n.adrs ?? [], language: n.language ?? '',
+          // spineColor is the active color used for gradient; separate per-palette colors for switching.
+          // spineGradient is the full space-separated stop-color string a single data() mapper resolves
+          // (Cytoscape cannot resolve data() mappers nested inside a stop-color array).
+          nodeColor: spineColor, ragColor, groupColor, typeColor,
+          spineGradient: `${spineColor} ${spineColor} ${NODE_FILL} ${NODE_FILL}`,
+          isCycle: !!n.cycleId, isShip, isLane: false,
+        },
+        position: { x, y },
+      };
+    }
+
+    function buildElements(d: typeof density): cytoscape.ElementDefinition[] {
+      const maxCol = PHASES.length - 1;
+      const hasShared = present.has('shared');
+      const VLANE_W = hasShared ? d.vlaneW : 0;
+      const bandW = d.headerPad + (maxCol + 1) * d.colW + d.subW + 24; // horizontal content width
+      const els: cytoscape.ElementDefinition[] = [];
+
+      // Horizontal end-goal lanes (shared is a VERTICAL lane; Unaligned appended last).
+      const hLanes = [
+        ...LANE_ORDER.filter((l) => l !== 'shared' && present.has(l)),
+        ...(present.has(UNALIGNED) ? [UNALIGNED] : []),
+      ];
+
+      // First pass: measure each horizontal lane (same-phase nodes wrap into subCols).
+      const laneTop: Record<string, number> = {};
+      const laneHeight: Record<string, number> = {};
+      let cursor = 0;
+      for (const lane of hLanes) {
+        const members = graphData.nodes.filter((n) => laneOf(n) === lane);
+        const colCounts: Record<number, number> = {};
+        for (const n of members) { const c = phaseRankOf(n); colCounts[c] = (colCounts[c] ?? 0) + 1; }
+        const maxRows = Math.max(1, ...Object.values(colCounts).map((c) => Math.ceil(c / d.subCols)));
+        const h = d.nodeY0 + maxRows * d.gapY + 18;
+        laneTop[lane] = cursor;
+        laneHeight[lane] = h;
+        cursor += h + 14; // lane gap
+      }
+      const totalH = Math.max(cursor - 14, 1);
+
+      // Horizontal lane bands (offset right by the vertical shared lane). The band
+      // rectangle carries NO label -- cytoscape draws a 'left'-haligned label OUTSIDE
+      // the left edge, which would land on the vertical band. Instead a dedicated
+      // right-haligned label node is anchored just inside the band's left edge.
+      for (const lane of hLanes) {
+        const h = laneHeight[lane];
+        els.push({
+          group: 'nodes',
+          data: { id: `__lane__${lane}`, label: '', isLane: true },
+          position: { x: VLANE_W + bandW / 2, y: laneTop[lane] + h / 2 },
+          locked: true, grabbable: false, selectable: false,
+          classes: lane === UNALIGNED ? 'laneband laneband-unaligned' : 'laneband',
+          style: { width: bandW, height: h },
+        });
+        els.push({
+          group: 'nodes',
+          data: { id: `__lanelabel__${lane}`, label: LANE_LABEL[lane] ?? lane, isLane: true },
+          position: { x: VLANE_W + 10, y: laneTop[lane] + 13 },
+          locked: true, grabbable: false, selectable: false,
+          classes: 'lanelabel',
+          style: { width: 1, height: 1 },
+        });
+      }
+
+      // Vertical shared lane band: full-height strip on the left, crossing every lane.
+      if (hasShared) {
+        els.push({
+          group: 'nodes',
+          data: { id: '__lane__shared', label: 'SHARED DEV TOOLING', isLane: true },
+          position: { x: VLANE_W / 2 - 4, y: totalH / 2 },
+          locked: true, grabbable: false, selectable: false,
+          classes: 'laneband laneband-vert',
+          style: { width: VLANE_W - 10, height: totalH },
+        });
+      }
+
+      // Horizontal nodes: mini-grid within each (lane,phase) cell. Track a ship anchor
+      // per lane (rightmost column) for supports-edge targets.
+      const stackIdx: Record<string, number> = {};
+      const shipByLane: Record<string, string> = {};
+      for (const n of graphData.nodes) {
+        const lane = laneOf(n);
+        if (lane === 'shared') continue; // placed vertically below
+        const col = phaseRankOf(n);
+        if (col === maxCol && !shipByLane[lane]) shipByLane[lane] = n.id;
+        const key = `${lane}|${col}`;
+        const si = stackIdx[key] ?? 0; stackIdx[key] = si + 1;
+        const subCol = si % d.subCols;
+        const subRow = Math.floor(si / d.subCols);
+        const x = VLANE_W + d.headerPad + col * d.colW + subCol * d.subW;
+        const y = laneTop[lane] + d.nodeY0 + subRow * d.gapY;
+        els.push(nodeEl(n, x, y, col === maxCol));
+      }
+
+      // Shared tools stacked vertically in the left strip.
+      if (hasShared) {
+        const sharedNodes = graphData.nodes.filter((n) => laneOf(n) === 'shared');
+        sharedNodes.forEach((n, i) => {
+          els.push(nodeEl(n, VLANE_W / 2 - 4, (totalH * (i + 1)) / (sharedNodes.length + 1), false));
+        });
+      }
+
+      // Real dependency edges.
+      for (const e of graphData.edges) {
+        els.push({
+          group: 'edges',
+          data: { id: `${e.s}--${e.t}--${e.d}`, source: e.s, target: e.d, edgeType: e.t, cycle: e.cycle, brk: e.brk },
+        });
+      }
+
+      // Supports edges: each shared tool -> the ship anchor of every lane it serves.
+      // This is the visual highlight of the cross-cutting nature of shared dev tooling.
+      if (hasShared) {
+        for (const n of graphData.nodes) {
+          if (laneOf(n) !== 'shared') continue;
+          for (const lane of n.supports ?? []) {
+            const target = shipByLane[lane];
+            if (target) {
+              els.push({
+                group: 'edges',
+                data: { id: `sup--${n.id}--${lane}`, source: n.id, target, edgeType: 'supports', cycle: false, brk: false },
+              });
+            }
+          }
+        }
+      }
+
+      return els;
+    }
+
+    container.querySelector('.dg-loading')?.remove();
+
+    const cy = cytoscape({
+      container,
+      elements: buildElements(density),
+      layout: { name: 'preset' },
+      style: [
+        // Lane bands: behind everything, uppercase label pinned top-left
+        {
+          selector: 'node.laneband',
+          style: {
+            shape: 'round-rectangle', 'background-color': '#11161d', 'background-opacity': 0.55,
+            'border-width': 1, 'border-color': '#2a3040', 'border-opacity': 1,
+            label: 'data(label)', color: '#7a8a9e', 'font-size': '13px', 'font-weight': 'bold',
+            'font-family': 'ui-monospace, Cascadia Code, monospace',
+            'text-valign': 'top', 'text-halign': 'left', 'text-margin-x': 12, 'text-margin-y': 10,
+            'text-transform': 'uppercase', 'z-index': 1, 'overlay-opacity': 0, events: 'no',
+          },
+        },
+        {
+          selector: 'node.laneband-vert',
+          style: {
+            'background-color': '#10171f', 'background-opacity': 0.75,
+            'border-color': '#2f6f8f', 'border-style': 'dashed', 'border-width': 1,
+            color: '#7fd3f0', 'text-valign': 'top', 'text-halign': 'center',
+            'text-margin-x': 0, 'text-margin-y': 8, 'text-wrap': 'wrap', 'text-max-width': '120px',
+            'font-size': '11px',
+          },
+        },
+        { selector: 'node.laneband-unaligned', style: { 'background-opacity': 0.3, color: '#4a5568' } },
+        {
+          selector: 'node.lanelabel',
+          style: {
+            'background-opacity': 0, 'border-width': 0,
+            label: 'data(label)', color: '#7a8a9e',
+            'font-family': 'ui-monospace, Cascadia Code, monospace',
+            'font-size': '11px', 'font-weight': 'bold', 'text-transform': 'uppercase',
+            'text-halign': 'right', 'text-valign': 'center', 'text-margin-x': 4,
+            'z-index': 3, events: 'no',
+          },
+        },
+        // Task A: beveled rectangle nodes with colored left spine (gradient technique)
+        // The spine is a 4px left bar: stop-colors <spine> <spine> #161b22 #161b22
+        // at stop-positions 0% ~3.5% ~3.5% 100%. applyColorBy updates nodeColor data
+        // which drives the gradient. Cytoscape gradient: background-fill linear-gradient,
+        // direction to-right with two-stop pairs. We use gradient stops via
+        // background-gradient-stop-colors / background-gradient-stop-positions.
+        {
+          selector: 'node[!isLane]',
+          style: {
+            shape: 'round-rectangle',
+            // corner-radius typed as string in Cytoscape TS defs
+            'corner-radius': '7px' as unknown as undefined,
+            width: 132, height: 40,
+            // Left-spine gradient: nodeColor for first 3.5%, then NODE_FILL.
+            // background-gradient-stop-colors expects string[] per types; pass as cast.
+            // background-gradient-stop-positions expects string[]; pass as cast.
+            // These ARE valid Cytoscape 3.x runtime properties.
+            'background-fill': 'linear-gradient',
+            'background-gradient-direction': 'to-right',
+            'background-gradient-stop-colors': 'data(spineGradient)' as unknown as undefined,
+            'background-gradient-stop-positions': '0% 3.5% 3.5% 100%' as unknown as undefined,
+            'border-width': 1, 'border-color': NODE_BORDER, 'border-opacity': 1,
+            // Two-line label (name \n type) centered INSIDE the node. Cytoscape's
+            // text-halign:left anchors the label OUTSIDE the left edge (that was the
+            // "text floats left of the node" bug); center keeps it cleanly inside,
+            // clear of the 4px left spine. Single color only (one-label limit).
+            label: 'data(twoline)', color: COLOR_TEXT,
+            'font-size': '9px',
+            'font-family': 'ui-monospace, "Cascadia Code", "Fira Code", "JetBrains Mono", monospace',
+            'text-valign': 'center', 'text-halign': 'center',
+            'text-margin-x': 2, 'text-margin-y': 0,
+            'text-wrap': 'wrap', 'text-max-width': '116px', 'line-height': 1.3,
+            'min-zoomed-font-size': 6, 'z-index': 10,
+          },
+        },
+        // Goal/ship/objective nodes: SAME width as regular nodes (prototype keeps a
+        // uniform node width; emphasis is rounder corners + heavier border, not size).
+        // Uniform width also keeps the no-overlap spacing invariant (subW sized for 132).
+        { selector: 'node[?goal]',  style: { 'corner-radius': '14px' as unknown as undefined, width: 132, height: 40, 'border-width': 2, 'border-color': '#3fb950', 'font-weight': 'bold' } },
+        { selector: 'node[?isShip]', style: { 'corner-radius': '14px' as unknown as undefined, width: 132, height: 40, 'border-width': 2, 'border-opacity': 1, 'font-weight': 'bold' } },
+        // Cycle nodes: 2px red border (on top of normal border)
+        { selector: 'node[?isCycle]', style: { 'border-width': 2, 'border-color': '#f0594f', 'border-opacity': 1 } },
+        { selector: 'node[type = "objective"]', style: { shape: 'round-rectangle', 'corner-radius': '14px' as unknown as undefined, width: 132, height: 40 } },
+        { selector: 'node[type = "gate"]', style: { shape: 'round-rectangle', 'corner-radius': '7px' as unknown as undefined, width: 132, height: 40 } },
+        // Task A: Edge styles matching prototype edgeStyle table
+        {
+          selector: 'edge',
+          style: {
+            'width': 1.2, 'line-color': '#2d3744', 'target-arrow-color': '#2d3744',
+            'target-arrow-shape': 'triangle', 'arrow-scale': 0.7, 'opacity': 0.8,
+            // Smooth S-bend (two control points) so edges curve and bend like the
+            // prototype's cubic paths, instead of rendering as straight LR segments.
+            'curve-style': 'unbundled-bezier',
+            'control-point-distances': ([26, -26] as unknown as undefined),
+            'control-point-weights': ([0.25, 0.75] as unknown as undefined),
+          },
+        },
+        { selector: 'edge[edgeType = "requires"]',   style: { 'line-color': '#7d8da3', 'target-arrow-color': '#7d8da3', 'width': 1.8, 'opacity': 0.9 } },
+        { selector: 'edge[edgeType = "blocked"]',    style: { 'line-color': '#f0594f', 'target-arrow-color': '#f0594f', 'width': 2.6, 'opacity': 1.0 } },
+        { selector: 'edge[edgeType = "supersedes"]', style: { 'line-color': '#d2a8ff', 'target-arrow-color': '#d2a8ff', 'line-style': 'dashed', 'line-dash-pattern': [6, 4], 'width': 1.6, 'opacity': 0.9 } },
+        { selector: 'edge[edgeType = "advances"]',   style: { 'line-color': '#8b5cf6', 'target-arrow-color': '#8b5cf6', 'width': 2.4, 'opacity': 0.9 } },
+        { selector: 'edge[edgeType = "gates"]',      style: { 'line-color': '#f97316', 'target-arrow-color': '#f97316', 'width': 2.0, 'opacity': 0.85 } },
+        { selector: 'edge[edgeType = "part-of"]',    style: { 'line-color': '#3a4656', 'target-arrow-color': '#3a4656', 'line-style': 'dotted', 'line-dash-pattern': [2, 4], 'width': 1.4, 'opacity': 0.85 } },
+        { selector: 'edge[edgeType = "related"]',    style: { 'line-color': '#2d3744', 'target-arrow-color': '#2d3744', 'line-style': 'dotted', 'line-dash-pattern': [1, 5], 'width': 1.2, 'opacity': 0.7 } },
+        // Supports edges: shared tool -> lane ship anchor. Subtle dim dashed fan-out.
+        { selector: 'edge[edgeType = "supports"]', style: { 'line-color': '#2f6f8f', 'target-arrow-color': '#2f6f8f', 'line-style': 'dashed', 'line-dash-pattern': [3, 5], 'width': 1, 'opacity': 0.35, 'curve-style': 'unbundled-bezier', 'z-index': 0 } },
+        // Cycle overlay: red dashed 5 4
+        { selector: 'edge[?cycle]', style: { 'line-color': '#f0594f', 'target-arrow-color': '#f0594f', 'line-style': 'dashed', 'line-dash-pattern': [5, 4], 'width': 2.2, 'opacity': 1 } },
+        // Break-point badge on the broken cycle edge
+        { selector: 'edge[?brk]',   style: { label: 'break', 'font-size': '8px', color: '#ffd9d6', 'text-rotation': 'autorotate', 'text-background-color': '#2a1414', 'text-background-opacity': 1, 'text-background-padding': '2px', 'text-border-color': '#f0594f', 'text-border-opacity': 1, 'text-border-width': 1 } },
+        { selector: '.dimmed',      style: { 'opacity': 0.12 } },
+        { selector: '.highlighted', style: { 'opacity': 1 } },
+      ],
+    });
+
+    // Operator console handle: inspect/drive the board from devtools
+    // (e.g. __kbCy.$('node[!isLane]').length). Harmless on an internal dashboard.
+    (window as unknown as { __kbCy?: unknown }).__kbCy = cy;
+
+    // Fit ALL elements (including the lane bands) so band labels -- especially the
+    // vertical SHARED label at the strip top -- are never clipped out of frame.
+    function fitNodes() { cy.fit(cy.elements(), 12); }
+    function initWhenSized() { if (container && container.clientWidth > 0) fitNodes(); else requestAnimationFrame(initWhenSized); }
+    requestAnimationFrame(initWhenSized);
+
+    let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+    const ro = new ResizeObserver(() => { clearTimeout(resizeTimer); resizeTimer = setTimeout(fitNodes, 150); });
+    ro.observe(container);
+
+    function rebuild() {
+      cy.startBatch();
+      cy.elements().remove();
+      cy.add(buildElements(density));
+      cy.endBatch();
+      cy.layout({ name: 'preset' }).run();
+      fitNodes();
+    }
+
+    // Task A: applyColorBy updates the left-spine gradient stop-colors.
+    // Cytoscape gradient stops are defined by background-gradient-stop-colors.
+    // We rebuild the stop string with the new spine color each time.
+    // Also update nodeColor data so the initial selector also stays in sync.
+    function applyColorBy(mode: string) {
+      cy.nodes('[!isLane]').forEach((node) => {
+        const d = node.data() as Record<string, unknown>;
+        const color = (mode === 'group' ? d.groupColor : mode === 'type' ? d.typeColor : d.ragColor) as string;
+        node.data('nodeColor', color);
+        // Update the gradient stop-color string; the style's data(spineGradient) mapper
+        // reacts to the data change and repaints the spine without a re-layout.
+        node.data('spineGradient', `${color} ${color} ${NODE_FILL} ${NODE_FILL}`);
+      });
+      // Update legend status text
+      const legendStatus = document.getElementById('dg-legend-status');
+      if (legendStatus) legendStatus.textContent = `color = ${mode.toUpperCase()} · layout = LR · click a node to focus its chain`;
+    }
+
+    // ---- inline detail panel ----
+    const $ = (id: string) => document.getElementById(id);
+    const detailPanel = $('dg-detail');
+    // Task B: title link is the primary node name element (clickable when routable)
+    const elTitleLink = $('dg-detail-title-link') as HTMLAnchorElement | null;
+    const elLabel = $('dg-detail-label'), elMeta = $('dg-detail-meta'), elCycle = $('dg-detail-cycle');
+    const launchWrap = $('dg-detail-launch');
+    const aCode = $('dg-launch-code') as HTMLAnchorElement | null;
+    const aRepo = $('dg-launch-repo') as HTMLAnchorElement | null;
+    const btnCd = $('dg-launch-cd')   as HTMLButtonElement | null;
+    const elHint = $('dg-launch-hint');
+    const nextWrap = $('dg-detail-next-wrap'), elNext = $('dg-detail-next');
+    const blkWrap = $('dg-detail-blk-wrap'), blkCount = $('dg-detail-blk-count'), blkList = $('dg-detail-blk-list');
+    const supWrap = $('dg-detail-supports-wrap'), elSup = $('dg-detail-supports');
+    const aFileBtn = $('dg-launch-file') as HTMLAnchorElement | null;
+    const objWrap = $('dg-detail-objective-wrap'), elObj = $('dg-detail-objective');
+    const probWrap = $('dg-detail-problem-wrap');
+    const probHead = $('dg-detail-problem-head'), elProb = $('dg-detail-problem');
+    const solHead = $('dg-detail-solution-head'), elSol = $('dg-detail-solution');
+    const nextstepsWrap = $('dg-detail-nextsteps-wrap'), nextstepsList = $('dg-detail-nextsteps-list');
+    const adrsWrap = $('dg-detail-adrs-wrap'), adrsList = $('dg-detail-adrs-list');
+
+    const sevClass = (s: string | null): string => {
+      const v = (s ?? '').toLowerCase();
+      if (v.startsWith('crit')) return 'dg-blk-sev--crit';
+      if (v.startsWith('high')) return 'dg-blk-sev--high';
+      if (v.startsWith('med'))  return 'dg-blk-sev--med';
+      return 'dg-blk-sev--low';
+    };
+    const sevRank = (s: string | null): number => {
+      const v = (s ?? '').toLowerCase();
+      return v.startsWith('crit') ? 0 : v.startsWith('high') ? 1 : v.startsWith('med') ? 2 : 3;
+    };
+
+    function clearHighlight() { cy.elements().removeClass('dimmed highlighted'); }
+    function hideDetail() { if (detailPanel) (detailPanel as HTMLElement).hidden = true; clearHighlight(); }
+    $('dg-detail-close')?.addEventListener('click', hideDetail);
+
+    cy.on('tap', 'node[!isLane]', (evt) => {
+      const node = evt.target as cytoscape.NodeSingular;
+      const d = node.data() as Record<string, unknown>;
+
+      cy.elements().addClass('dimmed');
+      node.closedNeighborhood().removeClass('dimmed').addClass('highlighted');
+
+      const label = String(d.label ?? '');
+      const href = String(d.href ?? '');
+
+      // Task B: node name is a clickable link at top when routable; plain label otherwise
+      if (elTitleLink) {
+        if (href) {
+          elTitleLink.hidden = false;
+          elTitleLink.textContent = label;
+          elTitleLink.href = href;
+          if (elLabel) (elLabel as HTMLElement).hidden = true;
+        } else {
+          elTitleLink.hidden = true;
+          if (elLabel) { (elLabel as HTMLElement).hidden = false; elLabel.textContent = label; }
+        }
+      } else if (elLabel) {
+        elLabel.textContent = label;
+      }
+
+      const rag = String(d.rag ?? '');
+      if (elMeta) {
+        const parts = [String(d.type ?? 'node')];
+        if (d.kind) parts.push(String(d.kind));
+        if (rag) parts.push(`RAG ${rag}`);
+        elMeta.textContent = parts.join(' · ');
+      }
+      if (elCycle) (elCycle as HTMLElement).hidden = !d.cycleId;
+
+      // Task B: Launch bar at TOP (already moved in HTML order above next-step/blockers)
+      const path = String(d.localPath ?? ''), repo = String(d.repo ?? ''), cmd = String(d.nextCommand ?? '');
+      let anyLaunch = false;
+      // VS Code: open the project via the vscode:// URI handler (reuses the running
+      // window where the OS allows; spawns one otherwise). Folder open MVP.
+      if (aCode) {
+        const show = !!path; aCode.hidden = !show;
+        if (show) { aCode.href = 'vscode://file/' + path.replace(/\\/g, '/'); anyLaunch = true; }
+      }
+      // Browser: open the repo.
+      if (aRepo) {
+        const show = !!repo; aRepo.hidden = !show;
+        if (show) { aRepo.href = repo; anyLaunch = true; }
+      }
+      // Terminal: copy `cd "<path>"; <command>` (single paste cd's then runs the
+      // operator command). Conditional -- omits whichever piece is absent.
+      if (btnCd) {
+        const payload = path ? (cmd ? `cd "${path}"; ${cmd}` : `cd "${path}"`) : cmd;
+        const show = !!payload; btnCd.hidden = !show;
+        if (show) { btnCd.dataset.copy = payload; anyLaunch = true; }
+      }
+      if (elHint) {
+        (elHint as HTMLElement).hidden = !path;
+        elHint.textContent = path ? path : '';
+      }
+      // File-target launcher: vscode://file/<localPath>/<file> -- show only when both present
+      const fileRel = String(d.file ?? '');
+      if (aFileBtn) {
+        const show = !!path && !!fileRel;
+        aFileBtn.hidden = !show;
+        if (show) {
+          const fullPath = (path.replace(/\\/g, '/').replace(/\/$/, '') + '/' + fileRel.replace(/\\/g, '/'));
+          aFileBtn.href = 'vscode://file/' + fullPath;
+          anyLaunch = true;
+        }
+      }
+      if (launchWrap) (launchWrap as HTMLElement).hidden = !anyLaunch;
+
+      // Operator next step
+      const next = String(d.nextAction ?? '');
+      if (nextWrap && elNext) { (nextWrap as HTMLElement).hidden = !next; elNext.textContent = next; }
+
+      // Blockers (severity-ranked)
+      const blockers = (Array.isArray(d.blockers) ? d.blockers : []) as CBlocker[];
+      if (blkWrap && blkList && blkCount) {
+        (blkWrap as HTMLElement).hidden = blockers.length === 0;
+        blkCount.textContent = blockers.length ? String(blockers.length) : '';
+        blkList.innerHTML = '';
+        [...blockers].sort((a, b) => sevRank(a.severity) - sevRank(b.severity)).forEach((b) => {
+          const li = document.createElement('li');
+          const sev = document.createElement('span');
+          sev.className = `dg-blk-sev ${sevClass(b.severity)}`;
+          sev.textContent = (b.severity ?? 'note').slice(0, 4);
+          const txt = document.createElement('span');
+          txt.className = 'dg-blk-txt';
+          txt.textContent = b.since ? `${b.text}  (${b.since})` : b.text;
+          li.append(sev, txt);
+          blkList.append(li);
+        });
+      }
+
+      // Supports (shared utilities)
+      const supports = (Array.isArray(d.supports) ? d.supports : []) as string[];
+      if (supWrap && elSup) {
+        (supWrap as HTMLElement).hidden = supports.length === 0;
+        elSup.textContent = supports.join(' · ');
+      }
+
+      // Objective
+      const objective = String(d.objective ?? '');
+      if (objWrap && elObj) {
+        (objWrap as HTMLElement).hidden = !objective;
+        elObj.textContent = objective;
+      }
+
+      // Problem + Solution: each sub-part toggles independently; outer block shows
+      // when either is present. Follows the same show/hide + textContent pattern
+      // as the Objective block above.
+      const problem = String(d.problem ?? '');
+      const solution = String(d.solution ?? '');
+      if (probWrap && probHead && elProb && solHead && elSol) {
+        (probWrap as HTMLElement).hidden = !problem && !solution;
+        (probHead as HTMLElement).hidden = !problem;
+        (elProb as HTMLElement).hidden = !problem;
+        elProb.textContent = problem;
+        (solHead as HTMLElement).hidden = !solution;
+        (elSol as HTMLElement).hidden = !solution;
+        elSol.textContent = solution;
+      }
+
+      // Next steps (ordered list, CSP-safe via textContent)
+      const nextsteps = (Array.isArray(d.nextsteps) ? d.nextsteps : []) as string[];
+      if (nextstepsWrap && nextstepsList) {
+        (nextstepsWrap as HTMLElement).hidden = nextsteps.length === 0;
+        nextstepsList.innerHTML = '';
+        nextsteps.forEach((step) => {
+          const li = document.createElement('li');
+          li.textContent = step;
+          nextstepsList.append(li);
+        });
+      }
+
+      // ADRs (plain text list, CSP-safe via textContent)
+      const adrs = (Array.isArray(d.adrs) ? d.adrs : []) as string[];
+      if (adrsWrap && adrsList) {
+        (adrsWrap as HTMLElement).hidden = adrs.length === 0;
+        adrsList.innerHTML = '';
+        adrs.forEach((ref) => {
+          const li = document.createElement('li');
+          li.textContent = ref;
+          adrsList.append(li);
+        });
+      }
+
+      if (detailPanel) (detailPanel as HTMLElement).hidden = false;
+    });
+
+    cy.on('tap', (evt) => { if (evt.target === cy) hideDetail(); });
+
+    // ---- left-rail controls ----
+    const ALL_EDGE_TYPES = ['requires', 'blocked', 'advances', 'supersedes', 'gates'];
+    const PRESETS: Record<string, { colorBy: string; hidden: string[] }> = {
+      triage:       { colorBy: 'rag',  hidden: [] },
+      architecture: { colorBy: 'type', hidden: [] },
+      blockers:     { colorBy: 'rag',  hidden: ['supersedes', 'advances', 'requires', 'gates'] },
+      adrs:         { colorBy: 'type', hidden: ['requires', 'advances', 'blocked', 'gates'] },
+    };
+
+    document.addEventListener('kb-color-by', (evt) => {
+      const mode = (evt as CustomEvent<{ mode: string }>).detail.mode;
+      applyColorBy(mode);
+    });
+    document.addEventListener('kb-density', (evt) => {
+      const compact = (evt as CustomEvent<{ compact: boolean }>).detail.compact;
+      density = compact ? { colW: 290, gapY: 48, nodeY0: 44, headerPad: 56, subW: 140, subCols: 2, vlaneW: 132 }
+                        : { colW: 344, gapY: 58, nodeY0: 52, headerPad: 64, subW: 164, subCols: 2, vlaneW: 168 };
+      rebuild();
+    });
+    document.addEventListener('kb-edge-toggle', (evt) => {
+      const { type, visible } = (evt as CustomEvent<{ type: string; visible: boolean }>).detail;
+      cy.edges(`[edgeType = "${type}"]`).style('display', visible ? 'element' : 'none');
+    });
+    document.addEventListener('kb-preset', (evt) => {
+      const p = PRESETS[(evt as CustomEvent<{ preset: string }>).detail.preset];
+      if (!p) return;
+      applyColorBy(p.colorBy);
+      for (const et of ALL_EDGE_TYPES) cy.edges(`[edgeType = "${et}"]`).style('display', p.hidden.includes(et) ? 'none' : 'element');
+      fitNodes();
+    });
+    document.addEventListener('kb-layout-dir', fitNodes);
+    document.addEventListener('kb-reset', () => { hideDetail(); fitNodes(); });
+  })();
+
+  // Copy-to-clipboard for .mc-copy-btn (detail launch bar + right-rail panels).
+  document.querySelectorAll<HTMLButtonElement>('.mc-copy-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const text = btn.dataset.copy ?? '';
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+        // Preserve innerHTML (some copy buttons carry an icon + label, not just text).
+        const orig = btn.innerHTML;
+        btn.textContent = '✓';
+        setTimeout(() => { btn.innerHTML = orig; }, 1200);
+      } catch { /* clipboard unavailable -- silent */ }
+    });
+  });
+</script>

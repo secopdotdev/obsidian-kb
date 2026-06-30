@@ -1,0 +1,53 @@
+---
+/**
+ * FrontmatterChips.astro — renders frontmatter as visual chips row.
+ * Shows: type, status, tags, aliases, and dates.
+ */
+export interface Props {
+  frontmatter: Record<string, unknown>;
+}
+
+const { frontmatter } = Astro.props;
+
+const type     = frontmatter.type as string | undefined;
+const status   = frontmatter.status as string | undefined;
+const tags     = (frontmatter.tags as string[] | undefined) ?? [];
+const aliases  = (frontmatter.aliases as string[] | undefined) ?? [];
+const created  = frontmatter.created as Date | string | undefined;
+const updated  = frontmatter.updated as Date | string | undefined;
+
+function fmtDate(d: Date | string | undefined): string {
+  if (!d) return '';
+  const date = d instanceof Date ? d : new Date(d);
+  return date.toISOString().slice(0, 10);
+}
+---
+
+<div class="chips-row" aria-label="Note metadata">
+  {type && (
+    <span class="chip chip--type" title="Note type">{type}</span>
+  )}
+  {status && (
+    <span class={`chip chip--status-${status}`} title="Status">{status}</span>
+  )}
+  {tags.map((tag) => (
+    <a href={`/search?filter[tag]=${encodeURIComponent(tag)}`}
+       class="chip chip--tag"
+       title={`Tag: ${tag}`}>#{tag}</a>
+  ))}
+  {aliases.map((alias) => (
+    <span class="chip" title={`Alias: ${alias}`}>{alias}</span>
+  ))}
+  {created && (
+    <span class="chip" title="Created">
+      <span aria-hidden="true">✦</span>
+      <time datetime={fmtDate(created)}>{fmtDate(created)}</time>
+    </span>
+  )}
+  {updated && updated !== created && (
+    <span class="chip" title="Updated">
+      <span aria-hidden="true">↻</span>
+      <time datetime={fmtDate(updated)}>{fmtDate(updated)}</time>
+    </span>
+  )}
+</div>

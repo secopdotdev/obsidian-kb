@@ -1,0 +1,27 @@
+---
+/**
+ * FlagBadge.astro — RAG flag badge (🔴🟡🟢).
+ * Renders a pill with accessible label and emoji indicator.
+ */
+export interface Props {
+  flag: string | undefined;
+  showLabel?: boolean;
+}
+
+const { flag, showLabel = true } = Astro.props;
+
+const config: Record<string, { emoji: string; label: string; cls: string }> = {
+  red:    { emoji: '🔴', label: 'On Fire',  cls: 'flag-badge--red'    },
+  yellow: { emoji: '🟡', label: 'Watch',    cls: 'flag-badge--yellow' },
+  green:  { emoji: '🟢', label: 'Green',    cls: 'flag-badge--green'  },
+};
+
+const c = flag ? config[flag] : undefined;
+---
+
+{c && (
+  <span class={`flag-badge ${c.cls}`} aria-label={`RAG flag: ${c.label}`}>
+    <span aria-hidden="true">{c.emoji}</span>
+    {showLabel && <span>{c.label}</span>}
+  </span>
+)}

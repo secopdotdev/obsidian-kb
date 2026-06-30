@@ -1,0 +1,14 @@
+{
+  "name": "obsidian-kb",
+  "owner": {
+    "name": "secopdotdev"
+  },
+  "description": "Knowledge-base toolkit: harvests repo metadata into a markdown+SQLite vault with Obsidian and Astro board viewers. Requires Python 3.13+ and Node 24+.",
+  "plugins": [
+    {
+      "name": "obsidian-kb",
+      "source": ".",
+      "description": "Knowledge-base toolkit for Claude Code: kb-sync, kb-status, reconciler, and optional Obsidian + Astro board viewers."
+    }
+  ]
+}

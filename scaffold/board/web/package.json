@@ -1,0 +1,26 @@
+{
+  "name": "mission-control",
+  "type": "module",
+  "version": "0.1.0",
+  "scripts": {
+    "prebuild": "node scripts/build-backlinks.mjs",
+    "dev": "astro dev",
+    "dev:lan": "astro dev --host",
+    "build": "astro build && npx pagefind --site dist",
+    "preview": "astro preview",
+    "serve": "astro preview --host --port 4321"
+  },
+  "dependencies": {
+    "@pagefind/default-ui": "^1.5.2",
+    "@portaljs/remark-wiki-link": "^1.0.0",
+    "astro": "^6.4.6",
+    "cytoscape": "^3.34.0",
+    "cytoscape-dagre": "^4.0.0",
+    "dagre": "^0.8.5"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.9",
+    "pagefind": "^1.5.2",
+    "typescript": "^6.0.3"
+  }
+}

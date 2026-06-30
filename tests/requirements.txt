@@ -1,0 +1,3 @@
+# Test dependencies for the obsidian-kb plugin CI.
+pytest>=8
+PyYAML>=6

@@ -1,0 +1,441 @@
+---
+/**
+ * CockpitLayout.astro — fixed-viewport operator cockpit.
+ * No TierNav, no scroll, no footer. Fills 100dvh.
+ *
+ * Named slots:
+ *   kpis      — header KPI chip strip (health counts)
+ *   controls  — left rail (graph controls, presets)
+ *   panels    — right column (On Fire, Next Move, ADRs)
+ *   (default) — center graph area (DependencyGraph)
+ */
+import '../styles/global.css';
+
+export interface Props {
+  title: string;
+  description?: string;
+}
+
+const { title, description = 'mission-control Mission Control' } = Astro.props;
+---
+
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content={description} />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>{title} · Mission Control</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="stylesheet" href="/pagefind/pagefind-ui.css" />
+  </head>
+  <body class="cpit-body">
+    <header class="cpit-header">
+      <a href="/" class="cpit-logo" aria-label="KB Home">
+        <span aria-hidden="true">&#x2B21;</span> Mission Control
+      </a>
+      <div class="cpit-kpis" role="status" aria-label="System health">
+        <slot name="kpis" />
+      </div>
+      <nav class="cpit-header-nav" aria-label="Quick links">
+        <a href="/search">Search</a>
+        <a href="/tiers/1.0-dev">Groups</a>
+        <a href="/notes/00-meta/_index">Meta</a>
+      </nav>
+    </header>
+    <div class="cpit-main" id="cpit-main">
+      <!-- Task D: collapsible left rail with toggle button -->
+      <aside class="cpit-controls-col" id="cpit-rail" aria-label="Graph controls">
+        <button
+          id="cpit-rail-toggle"
+          class="cpit-rail-toggle"
+          type="button"
+          aria-label="Collapse controls rail"
+          aria-expanded="true"
+          aria-controls="cpit-rail"
+        >&#x276C;</button>
+        <div class="cpit-rail-content" id="cpit-rail-content">
+          <slot name="controls" />
+        </div>
+      </aside>
+      <!-- Drag gutter: rail | graph (sits on the column divider) -->
+      <div
+        class="cpit-gutter cpit-gutter--rail"
+        id="cpit-gutter-rail"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize controls rail"
+        tabindex="0"
+      ></div>
+      <main class="cpit-graph-col" id="cpit-graph">
+        <slot />
+      </main>
+      <!-- Drag gutter: graph | panels -->
+      <div
+        class="cpit-gutter cpit-gutter--panel"
+        id="cpit-gutter-panel"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize project panels"
+        tabindex="0"
+      ></div>
+      <aside class="cpit-panels-col" aria-label="Project panels">
+        <slot name="panels" />
+      </aside>
+    </div>
+  </body>
+</html>
+
+<!-- Task D + resize: collapse & drag-resize share the column vars (externalized by Astro to CSP 'self') -->
+<script>
+  (function () {
+    const KEY_COLLAPSED = 'kb-rail-collapsed';
+    const KEY_RAIL_W    = 'kb-rail-w';
+    const KEY_PANEL_W   = 'kb-panel-w';
+
+    // Column bounds (px). GRAPH_MIN guarantees the center graph never collapses.
+    const RAIL_DEFAULT = 185, RAIL_MIN = 120, RAIL_MAX = 360;
+    const PANEL_DEFAULT = 265, PANEL_MIN = 200, PANEL_MAX = 480;
+    const GRAPH_MIN = 320;
+    const COLLAPSED_W = 24;
+
+    const rail = document.getElementById('cpit-rail') as HTMLElement | null;
+    const main = document.getElementById('cpit-main') as HTMLElement | null;
+    const toggle = document.getElementById('cpit-rail-toggle') as HTMLButtonElement | null;
+    const gutterRail = document.getElementById('cpit-gutter-rail') as HTMLElement | null;
+    const gutterPanel = document.getElementById('cpit-gutter-panel') as HTMLElement | null;
+    if (!rail || !toggle || !main) return;
+
+    const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
+    const readNum = (key: string, fallback: number): number => {
+      try { const v = Number(localStorage.getItem(key)); return Number.isFinite(v) && v > 0 ? v : fallback; }
+      catch { return fallback; }
+    };
+    const persist = (key: string, val: number | string) => {
+      try { localStorage.setItem(key, String(val)); } catch { /* quota / private */ }
+    };
+    const setVar = (name: string, px: number) => main!.style.setProperty(name, `${px}px`);
+    const getVar = (name: string, fallback: number): number =>
+      parseFloat(getComputedStyle(main!).getPropertyValue(name)) || fallback;
+
+    // Last expanded rail width — restored when the rail is un-collapsed.
+    let railExpandedW = readNum(KEY_RAIL_W, RAIL_DEFAULT);
+    let panelW = clamp(readNum(KEY_PANEL_W, PANEL_DEFAULT), PANEL_MIN, PANEL_MAX);
+
+    // ── Collapse / expand ──────────────────────────────────────────────────
+    function setCollapsed(collapsed: boolean, persistState = true) {
+      if (collapsed) {
+        rail!.classList.add('rail-collapsed');
+        main!.classList.add('rail-collapsed');
+        setVar('--rail-w', COLLAPSED_W);
+        toggle!.setAttribute('aria-expanded', 'false');
+        toggle!.setAttribute('aria-label', 'Expand controls rail');
+        toggle!.textContent = '❭';
+      } else {
+        rail!.classList.remove('rail-collapsed');
+        main!.classList.remove('rail-collapsed');
+        setVar('--rail-w', railExpandedW);
+        toggle!.setAttribute('aria-expanded', 'true');
+        toggle!.setAttribute('aria-label', 'Collapse controls rail');
+        toggle!.textContent = '❬';
+      }
+      document.dispatchEvent(new CustomEvent('kb-reset'));
+      if (persistState) persist(KEY_COLLAPSED, collapsed ? '1' : '0');
+    }
+
+    // ── Restore session state ──────────────────────────────────────────────
+    setVar('--panel-w', panelW);
+    let initialCollapsed = false;
+    try { initialCollapsed = localStorage.getItem(KEY_COLLAPSED) === '1'; } catch { /* private */ }
+    setVar('--rail-w', railExpandedW);
+    setCollapsed(initialCollapsed, false);
+
+    toggle.addEventListener('click', () => {
+      setCollapsed(!rail!.classList.contains('rail-collapsed'));
+    });
+
+    // ── Drag-resize ────────────────────────────────────────────────────────
+    function startDrag(which: 'rail' | 'panel', gutter: HTMLElement, pointerId: number) {
+      const rect = main!.getBoundingClientRect();
+      main!.classList.add('resizing');
+      gutter.classList.add('dragging');
+      try { gutter.setPointerCapture(pointerId); } catch { /* unsupported */ }
+
+      const onMove = (ev: PointerEvent) => {
+        if (which === 'rail') {
+          const maxByGraph = rect.width - getVar('--panel-w', panelW) - GRAPH_MIN;
+          const w = clamp(ev.clientX - rect.left, RAIL_MIN, Math.min(RAIL_MAX, maxByGraph));
+          setVar('--rail-w', w);
+        } else {
+          const maxByGraph = rect.width - getVar('--rail-w', railExpandedW) - GRAPH_MIN;
+          const w = clamp(rect.right - ev.clientX, PANEL_MIN, Math.min(PANEL_MAX, maxByGraph));
+          setVar('--panel-w', w);
+        }
+      };
+
+      const onUp = () => {
+        main!.classList.remove('resizing');
+        gutter.classList.remove('dragging');
+        gutter.removeEventListener('pointermove', onMove);
+        gutter.removeEventListener('pointerup', onUp);
+        gutter.removeEventListener('pointercancel', onUp);
+        if (which === 'rail') {
+          railExpandedW = getVar('--rail-w', railExpandedW);
+          persist(KEY_RAIL_W, Math.round(railExpandedW));
+        } else {
+          panelW = getVar('--panel-w', panelW);
+          persist(KEY_PANEL_W, Math.round(panelW));
+        }
+        // Refit the graph once, on release (not on every move).
+        document.dispatchEvent(new CustomEvent('kb-reset'));
+      };
+
+      gutter.addEventListener('pointermove', onMove);
+      gutter.addEventListener('pointerup', onUp);
+      gutter.addEventListener('pointercancel', onUp);
+    }
+
+    gutterRail?.addEventListener('pointerdown', (ev) => {
+      ev.preventDefault();
+      startDrag('rail', gutterRail, ev.pointerId);
+    });
+    gutterPanel?.addEventListener('pointerdown', (ev) => {
+      ev.preventDefault();
+      startDrag('panel', gutterPanel, ev.pointerId);
+    });
+
+    // Keyboard a11y: arrow keys nudge a focused gutter by 16px.
+    function nudge(which: 'rail' | 'panel', delta: number) {
+      const rect = main!.getBoundingClientRect();
+      if (which === 'rail') {
+        const maxByGraph = rect.width - getVar('--panel-w', panelW) - GRAPH_MIN;
+        railExpandedW = clamp(getVar('--rail-w', railExpandedW) + delta, RAIL_MIN, Math.min(RAIL_MAX, maxByGraph));
+        setVar('--rail-w', railExpandedW);
+        persist(KEY_RAIL_W, Math.round(railExpandedW));
+      } else {
+        const maxByGraph = rect.width - getVar('--rail-w', railExpandedW) - GRAPH_MIN;
+        panelW = clamp(getVar('--panel-w', panelW) + delta, PANEL_MIN, Math.min(PANEL_MAX, maxByGraph));
+        setVar('--panel-w', panelW);
+        persist(KEY_PANEL_W, Math.round(panelW));
+      }
+      document.dispatchEvent(new CustomEvent('kb-reset'));
+    }
+    gutterRail?.addEventListener('keydown', (ev) => {
+      if (ev.key === 'ArrowLeft')  { ev.preventDefault(); nudge('rail', -16); }
+      if (ev.key === 'ArrowRight') { ev.preventDefault(); nudge('rail',  16); }
+    });
+    gutterPanel?.addEventListener('keydown', (ev) => {
+      if (ev.key === 'ArrowLeft')  { ev.preventDefault(); nudge('panel',  16); }
+      if (ev.key === 'ArrowRight') { ev.preventDefault(); nudge('panel', -16); }
+    });
+  })();
+</script>
+
+<style is:global>
+  /* ── Reset for cockpit page only ────────────────────────────────────────── */
+  html, body {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+  }
+
+  /* ── Dark theme lock ──────────────────────────────────────────────────────
+   * The cockpit is theme-locked dark per the Mission Control brief. The lock is
+   * specificity-based, NOT cascade-order-based: <html data-theme="dark"> means
+   * global.css's `:root:not([data-theme])` light-mode block never matches here,
+   * so the dark :root defaults stand regardless of OS preference or bundle order.
+   * color-scheme:dark also darkens UA chrome (scrollbars, form controls). */
+  html[data-theme='dark'] { color-scheme: dark; }
+</style>
+
+<style>
+  /* ── Layout shell ────────────────────────────────────────────────────────── */
+
+  .cpit-body {
+    display: flex;
+    flex-direction: column;
+    height: 100dvh;
+    overflow: hidden;
+    background: var(--color-bg);
+    color: var(--color-text);
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+  }
+
+  /* ── Slim header (2.5 rem) ───────────────────────────────────────────────── */
+
+  .cpit-header {
+    height: 2.5rem;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: 0 var(--space-4);
+    background: var(--color-surface);
+    border-bottom: 1px solid var(--color-border);
+    overflow: hidden;
+  }
+
+  .cpit-logo {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    font-weight: 700;
+    color: var(--color-accent);
+    text-decoration: none;
+    white-space: nowrap;
+    flex-shrink: 0;
+    letter-spacing: 0.04em;
+  }
+
+  .cpit-logo:hover { color: var(--color-link-hover); }
+
+  .cpit-kpis {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    overflow: hidden;
+    min-width: 0;
+  }
+
+  .cpit-header-nav {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+    flex-shrink: 0;
+  }
+
+  .cpit-header-nav a {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    text-decoration: none;
+    transition: color var(--transition);
+  }
+
+  .cpit-header-nav a:hover { color: var(--color-accent); }
+
+  /* ── 3-column body ───────────────────────────────────────────────────────── */
+
+  /* Column widths are single-source-of-truth CSS vars so collapse AND live
+     drag-resize compose instead of stomping each other (both write the vars;
+     the grid template only ever reads them). */
+  .cpit-main {
+    --rail-w: 185px;
+    --panel-w: 265px;
+    flex: 1;
+    position: relative;            /* anchor for the absolute drag gutters */
+    display: grid;
+    grid-template-columns: var(--rail-w) 1fr var(--panel-w);
+    overflow: hidden;
+    min-height: 0;
+    transition: grid-template-columns 150ms ease;
+  }
+
+  /* While dragging a gutter, kill the collapse animation so resize tracks the
+     pointer 1:1 (no rubber-banding). */
+  .cpit-main.resizing { transition: none; }
+
+  /* Task D: collapsed rail narrows the left column. Sets the var (not a hard
+     template) so an expand restores the user's dragged width. */
+  .cpit-main.rail-collapsed { --rail-w: 24px; }
+
+  /* ── Drag gutters (resize columns) ───────────────────────────────────────── */
+  .cpit-gutter {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 7px;
+    z-index: 25;
+    cursor: col-resize;
+    background: transparent;
+    transition: background var(--transition);
+    touch-action: none;
+  }
+
+  .cpit-gutter:hover,
+  .cpit-gutter.dragging { background: var(--color-accent-dim); }
+  .cpit-gutter:focus-visible { outline: 2px solid var(--color-border-focus); outline-offset: -1px; }
+
+  /* Center each gutter's hit area over its column divider. */
+  .cpit-gutter--rail  { left: var(--rail-w); transform: translateX(-50%); }
+  .cpit-gutter--panel { right: var(--panel-w); transform: translateX(50%); }
+
+  /* Collapsed rail: the rail gutter would only confuse (use the toggle). */
+  .cpit-main.rail-collapsed .cpit-gutter--rail { display: none; }
+
+  /* Task D: collapsible left rail */
+  .cpit-controls-col {
+    position: relative;
+    overflow-y: auto;
+    overflow-x: hidden;
+    border-right: 1px solid var(--color-border);
+    background: var(--color-surface);
+    padding: var(--space-3) var(--space-3);
+    min-width: 0;
+    transition: width 150ms ease, padding 150ms ease;
+  }
+
+  /* Collapsed state: 24px thin strip, content hidden */
+  .cpit-controls-col.rail-collapsed {
+    width: 24px !important;
+    min-width: 24px;
+    padding: 0;
+    overflow: hidden;
+  }
+
+  .cpit-controls-col.rail-collapsed .cpit-rail-content {
+    display: none;
+  }
+
+  /* Toggle button: small handle on the right edge of the rail */
+  .cpit-rail-toggle {
+    position: absolute;
+    top: var(--space-2);
+    right: 2px;
+    z-index: 30;
+    background: var(--color-surface-alt);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    color: var(--color-text-dim);
+    font-size: 10px;
+    line-height: 1;
+    padding: 2px 4px;
+    cursor: pointer;
+    transition: color var(--transition), border-color var(--transition);
+    white-space: nowrap;
+  }
+
+  .cpit-rail-toggle:hover { color: var(--color-accent); border-color: var(--color-accent-dim); }
+  .cpit-rail-toggle:focus-visible { outline: 2px solid var(--color-border-focus); outline-offset: 2px; }
+
+  /* When collapsed: toggle sits at top of the thin strip */
+  .cpit-controls-col.rail-collapsed .cpit-rail-toggle {
+    position: static;
+    display: block;
+    width: 100%;
+    margin: var(--space-2) 0;
+    text-align: center;
+  }
+
+  .cpit-graph-col {
+    position: relative;
+    overflow: hidden;
+    min-width: 0;
+    background: var(--color-bg);
+    display: flex;
+    flex-direction: column;
+  }
+
+  .cpit-panels-col {
+    border-left: 1px solid var(--color-border);
+    background: var(--color-surface);
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    overflow-x: hidden;
+    min-width: 0;
+  }
+</style>

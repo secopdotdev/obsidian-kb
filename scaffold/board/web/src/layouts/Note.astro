@@ -1,0 +1,678 @@
+---
+/**
+ * Note.astro — layout for individual KB notes.
+ * - Wraps content in <main data-pagefind-body> for Pagefind indexing.
+ * - Emits data-pagefind-filter spans for type and each tag.
+ * - Emits data-pagefind-meta for title.
+ * - Shows TOC (from headings), frontmatter chips, and backlinks rail.
+ * - For type:project notes, renders an operator action zone above the fold:
+ *   blockers (red) → next-action/nextsteps → copyable next-command → doc links.
+ * - No inline event handlers (CSP: script-src 'self').
+ */
+import Base from './Base.astro';
+import Breadcrumb from '../components/Breadcrumb.astro';
+import Backlinks from '../components/Backlinks.astro';
+import FrontmatterChips from '../components/FrontmatterChips.astro';
+import FlagBadge from '../components/FlagBadge.astro';
+
+export interface TocEntry {
+  depth: number;
+  slug: string;
+  text: string;
+}
+
+export interface Props {
+  title: string;
+  description?: string;
+  frontmatter: Record<string, unknown>;
+  headings: TocEntry[];
+  noteId: string;
+}
+
+const { title, description, frontmatter, headings, noteId } = Astro.props;
+
+// Build breadcrumb segments from noteId path.
+// e.g. "02-projects/example-cli" → [{ label: "02-projects", href: "/" }, { label: "example-cli", href: current }]
+const segments = noteId.split('/');
+const crumbs = [
+  { label: 'Home', href: '/' },
+  ...segments.map((seg, i) => ({
+    label: seg,
+    href: i < segments.length - 1
+      ? `/notes/${segments.slice(0, i + 1).join('/')}`
+      : undefined,
+  })),
+];
+
+// TOC: only h2-h4 are useful for sidebar navigation.
+const tocItems = headings.filter((h) => h.depth >= 2 && h.depth <= 4);
+
+const ragFlag = frontmatter['rag-flag'] as string | undefined;
+
+// --------------------------------------------------------------------------
+// Operator action zone — project-type notes only
+// --------------------------------------------------------------------------
+const isProject = frontmatter.type === 'project';
+
+interface BlockerObj {
+  text: string;
+  severity?: string;
+  since?: string;
+  unblock?: string;
+  slug?: string;
+}
+
+const SEVERITY_LABEL: Record<string, string> = {
+  crit: 'CRIT', high: 'HIGH', med: 'MED', low: 'LOW',
+};
+const SEVERITY_CLASS: Record<string, string> = {
+  crit: 'sev-crit', high: 'sev-high', med: 'sev-med', low: 'sev-low',
+};
+const PHASE_CLASS: Record<string, string> = {
+  seed: 'phase-seed', build: 'phase-build', harden: 'phase-harden', ship: 'phase-ship',
+};
+const SHELL_LABEL: Record<string, string> = { ps1: 'PS1', ssh: 'SSH', bash: 'BASH' };
+const SHELL_CLASS: Record<string, string> = { ps1: 'shell-ps1', ssh: 'shell-ssh', bash: 'shell-bash' };
+
+const rawBlockers = isProject
+  ? ((frontmatter.blockers as Array<string | BlockerObj> | undefined) ?? [])
+  : [];
+const blockers: BlockerObj[] = rawBlockers
+  .map(b => typeof b === 'string' ? { text: b } : b as BlockerObj)
+  .filter(b => Boolean(b.text));
+
+const nextsteps    = isProject ? ((frontmatter.nextsteps   as string[] | undefined) ?? []) : [];
+const nextAction   = isProject ? (frontmatter['next-action']  as string | undefined) : undefined;
+const nextCommand  = isProject ? (frontmatter['next-command'] as string | undefined) : undefined;
+const cmdShell     = isProject ? (frontmatter['next-command-shell'] as string | undefined) : undefined;
+const repoUrl      = isProject ? (frontmatter.repo  as string | undefined) : undefined;
+const repoPath     = isProject ? (frontmatter.path  as string | undefined) : undefined;
+const phase        = isProject ? (frontmatter.phase as string | undefined) : undefined;
+const advances     = isProject ? (frontmatter.advances as string | undefined) : undefined;
+const objective    = isProject ? (frontmatter.objective as string | undefined) : undefined;
+const problem      = isProject ? (frontmatter.problem  as string | undefined) : undefined;
+const solution     = isProject ? (frontmatter.solution as string | undefined) : undefined;
+const lastDocSha   = frontmatter['last-documented-sha'] as string | undefined;
+const isStale      = Boolean(frontmatter.stale);
+// Artifact flags written by kb-harvest (Phase 4)
+const hasReadme    = Boolean(frontmatter.readme_index_exists);
+const hasPlan      = Boolean(frontmatter.plan_file_exists);
+const decisionCount = (frontmatter.decision_count as number | undefined) ?? 0;
+const repoBranch   = (frontmatter.branch as string | undefined) ?? 'master';
+const remoteTrees  = (frontmatter['remote-trees'] as Array<{host:string;path:string;branch?:string}> | undefined) ?? [];
+
+// The primary "what to do next" line: prefer next-action, fall back to first nextstep.
+const primaryAction = nextAction ?? (nextsteps.length > 0 ? nextsteps[0] : undefined);
+// Additional steps: when next-action is set show all nextsteps; when it's the fallback skip first.
+const extraSteps = nextAction ? nextsteps : nextsteps.slice(1);
+---
+
+<Base title={title} description={description}>
+  <main
+    class="layout-content"
+    data-pagefind-body
+    data-pagefind-meta={`title:${title}`}
+  >
+    <!-- Hidden Pagefind filter spans — indexed but not visible. -->
+    {frontmatter.type && (
+      <span
+        data-pagefind-filter={`type:${frontmatter.type}`}
+        class="sr-only"
+        aria-hidden="true"
+      >{String(frontmatter.type)}</span>
+    )}
+    {Array.isArray(frontmatter.tags) && (frontmatter.tags as string[]).map((tag) => (
+      <span
+        data-pagefind-filter={`tag:${tag}`}
+        class="sr-only"
+        aria-hidden="true"
+      >{tag}</span>
+    ))}
+
+    <!-- Breadcrumb -->
+    <Breadcrumb crumbs={crumbs} />
+
+    <!-- Title + rag flag -->
+    <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;margin-bottom:0.5rem;">
+      <h1 style="margin:0;">{title}</h1>
+      {ragFlag && <FlagBadge flag={ragFlag} />}
+    </div>
+
+    <!-- Stale banner (docs behind HEAD) -->
+    {isStale && (
+      <div class="stale-banner" role="alert">
+        ⚠ Docs stale — last documented at <code>{lastDocSha?.slice(0, 8)}</code>
+      </div>
+    )}
+
+    <!-- Operator action zone (project-type notes only) -->
+    {isProject && (
+      <div class="op-zone" role="region" aria-label="Operator action zone">
+
+        {/* Zone header: phase + advances badges */}
+        {(phase || advances) && (
+          <div class="op-meta-row">
+            {phase && <span class={`badge-phase ${PHASE_CLASS[phase] ?? ''}`}>{phase}</span>}
+            {advances && <span class="badge-advances">{advances}</span>}
+          </div>
+        )}
+
+        {/* Blockers — severity badge + since + unblock text */}
+        {blockers.length > 0 && (
+          <div class="op-blockers" aria-label="Blockers">
+            {blockers.map((b) => (
+              <div class="op-blocker-card">
+                <div class="op-blocker-header">
+                  {b.severity && (
+                    <span class={`badge-sev ${SEVERITY_CLASS[b.severity] ?? 'sev-low'}`}>
+                      {SEVERITY_LABEL[b.severity] ?? b.severity.toUpperCase()}
+                    </span>
+                  )}
+                  <span class="op-blocker-text">⚠ {b.text}</span>
+                  {b.since && b.since !== 'unknown' && (
+                    <span class="op-blocker-since">since {b.since}</span>
+                  )}
+                </div>
+                {b.unblock && b.unblock !== 'No unblock steps recorded.' && (
+                  <p class="op-blocker-unblock">{b.unblock}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Objective */}
+        {objective && (
+          <p class="op-objective">{objective}</p>
+        )}
+
+        {/* Primary next action */}
+        {primaryAction && (
+          <div class="op-row">
+            <span class="op-label">NEXT</span>
+            <span class="op-val">{primaryAction}</span>
+          </div>
+        )}
+
+        {/* Full uncapped nextsteps list */}
+        {extraSteps.length > 0 && (
+          <ol class="op-steps">
+            {extraSteps.map((s) => <li>{s}</li>)}
+          </ol>
+        )}
+
+        {/* Copyable command + shell badge */}
+        {nextCommand && (
+          <div class="op-cmd-row">
+            {cmdShell && (
+              <span class={`badge-shell ${SHELL_CLASS[cmdShell] ?? ''}`} aria-label={`Shell: ${cmdShell}`}>
+                {SHELL_LABEL[cmdShell] ?? cmdShell.toUpperCase()}
+              </span>
+            )}
+            <code class="op-cmd-code">{nextCommand}</code>
+            <button
+              class="op-copy-btn"
+              type="button"
+              data-copy-cmd={nextCommand}
+              aria-label={`Copy command for ${title}`}
+            >copy</button>
+          </div>
+        )}
+
+        {/* Doc / artifact links strip */}
+        <div class="op-links">
+          {repoUrl && (
+            <a href={repoUrl} class="op-link" target="_blank" rel="noopener noreferrer">↗ repo</a>
+          )}
+          {repoUrl && hasPlan && (
+            <a href={`${repoUrl}/blob/${repoBranch}/active/plan/PLAN.md`} class="op-link" target="_blank" rel="noopener noreferrer">↗ plan</a>
+          )}
+          {repoUrl && decisionCount > 0 && (
+            <a href={`${repoUrl}/blob/${repoBranch}/active/decisions`} class="op-link" target="_blank" rel="noopener noreferrer">↗ {decisionCount} ADR{decisionCount !== 1 ? 's' : ''}</a>
+          )}
+          {repoUrl && hasReadme && (
+            <a href={`${repoUrl}/blob/${repoBranch}/.readme/_index.md`} class="op-link" target="_blank" rel="noopener noreferrer">↗ .readme</a>
+          )}
+          {repoPath && (
+            <Fragment>
+              {repoUrl && <span class="op-sep" aria-hidden="true">·</span>}
+              <span class="op-path">{repoPath}</span>
+            </Fragment>
+          )}
+          {lastDocSha && (
+            <Fragment>
+              <span class="op-sep" aria-hidden="true">·</span>
+              {repoUrl
+                ? <a href={`${repoUrl}/commit/${lastDocSha}`} class="op-sha op-link" target="_blank" rel="noopener noreferrer" title="Last documented commit">{lastDocSha.slice(0, 8)}</a>
+                : <code class="op-sha">{lastDocSha.slice(0, 8)}</code>
+              }
+            </Fragment>
+          )}
+        </div>
+
+        {/* Remote trees (homelab sync targets) */}
+        {remoteTrees.length > 0 && (
+          <details class="op-remote-trees">
+            <summary class="op-label">Remote trees ({remoteTrees.length})</summary>
+            <ul class="op-tree-list">
+              {remoteTrees.map((t) => (
+                <li><code>{t.host}:{t.path}</code>{t.branch ? <span class="op-tree-branch"> [{t.branch}]</span> : null}</li>
+              ))}
+            </ul>
+          </details>
+        )}
+
+      </div>
+    )}
+
+    <!-- Problem / Solution collapsible sections -->
+    {isProject && (problem || solution) && (
+      <div class="prose-sections">
+        {problem && (
+          <details class="prose-section">
+            <summary>Problem</summary>
+            <p>{problem}</p>
+          </details>
+        )}
+        {solution && (
+          <details class="prose-section">
+            <summary>Solution</summary>
+            <p>{solution}</p>
+          </details>
+        )}
+      </div>
+    )}
+
+    <!-- Frontmatter chips -->
+    <FrontmatterChips frontmatter={frontmatter} />
+
+    <!-- Note body -->
+    <slot />
+  </main>
+
+  <!-- Right rail: TOC + backlinks -->
+  <aside class="layout-rail" aria-label="On this page and backlinks">
+    {tocItems.length > 0 && (
+      <nav class="toc" aria-label="Table of contents">
+        <p class="toc-title">On this page</p>
+        <ol>
+          {tocItems.map((h) => (
+            <li>
+              <a href={`#${h.slug}`} data-depth={String(h.depth)}>{h.text}</a>
+            </li>
+          ))}
+        </ol>
+      </nav>
+    )}
+
+    {tocItems.length > 0 && <hr class="rail-divider" />}
+
+    <Backlinks noteId={noteId} />
+  </aside>
+</Base>
+
+<!-- Copy-to-clipboard for .op-copy-btn (externalized by Vite → CSP 'self' OK) -->
+<script>
+  document.querySelectorAll<HTMLButtonElement>('[data-copy-cmd]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const text = btn.dataset.copyCmd ?? '';
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+        const orig = btn.textContent ?? 'copy';
+        btn.textContent = 'copied!';
+        btn.classList.add('op-copy-btn--done');
+        setTimeout(() => {
+          btn.textContent = orig;
+          btn.classList.remove('op-copy-btn--done');
+        }, 2000);
+      } catch { /* clipboard unavailable — silent */ }
+    });
+  });
+</script>
+
+<style>
+  /* ── Operator action zone ───────────────────────────────────────────────── */
+
+  .op-zone {
+    margin: var(--space-4) 0 var(--space-6);
+    padding: var(--space-3) var(--space-4);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  /* Blockers */
+  .op-blockers {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    border-left: 2px solid var(--color-red);
+    padding-left: var(--space-3);
+  }
+
+  .op-blocker {
+    margin: 0;
+    font-size: var(--text-xs);
+    color: var(--color-red);
+    line-height: 1.5;
+  }
+
+  /* Next-action row */
+  .op-row {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-3);
+  }
+
+  .op-label {
+    font-family: var(--font-mono);
+    font-size: 8px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--color-text-dim);
+    white-space: nowrap;
+    flex-shrink: 0;
+    padding-top: 2px;
+  }
+
+  .op-val {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    line-height: 1.5;
+  }
+
+  /* Extra steps list */
+  .op-steps {
+    margin: 0;
+    padding-left: 1.5rem;
+    list-style: decimal;
+  }
+
+  .op-steps li {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    line-height: 1.6;
+    margin-bottom: 2px;
+  }
+
+  /* Command row */
+  .op-cmd-row {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    margin-top: var(--space-1);
+  }
+
+  .op-cmd-code {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    background: #0a0e14;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    padding: 4px 8px;
+    color: var(--color-accent);
+    flex: 1;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    display: block;
+    min-width: 0;
+    line-height: 1.5;
+  }
+
+  .op-copy-btn {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 3px 8px;
+    background: var(--color-surface-alt);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+    transition: color var(--transition), border-color var(--transition);
+    margin-top: 2px; /* optical align with code baseline */
+  }
+
+  .op-copy-btn:hover        { color: var(--color-text); border-color: var(--color-accent-dim); }
+  .op-copy-btn:focus-visible { outline: 2px solid var(--color-border-focus); outline-offset: 2px; }
+  .op-copy-btn--done        { color: var(--color-green) !important; border-color: rgba(34, 197, 94, 0.4) !important; }
+
+  /* Doc links strip */
+  .op-links {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    margin-top: var(--space-1);
+    border-top: 1px solid var(--color-border);
+    padding-top: var(--space-2);
+  }
+
+  .op-link {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-link);
+    text-decoration: none;
+    transition: color var(--transition);
+  }
+
+  .op-link:hover        { color: var(--color-link-hover); }
+  .op-link:focus-visible { outline: 2px solid var(--color-border-focus); border-radius: var(--radius-sm); }
+
+  .op-sep {
+    color: var(--color-border);
+    user-select: none;
+  }
+
+  .op-path {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-dim);
+  }
+
+  /* ── Stale banner ─────────────────────────────────────────────────────────── */
+
+  .stale-banner {
+    margin: var(--space-3) 0;
+    padding: var(--space-2) var(--space-4);
+    background: rgba(250, 204, 21, 0.08);
+    border: 1px solid rgba(250, 204, 21, 0.35);
+    border-radius: var(--radius);
+    font-size: var(--text-xs);
+    color: var(--color-yellow);
+  }
+
+  /* ── Phase + advances badges ─────────────────────────────────────────────── */
+
+  .op-meta-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    margin-bottom: var(--space-1);
+  }
+
+  .badge-phase {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 2px 7px;
+    border-radius: var(--radius-sm);
+    border: 1px solid transparent;
+  }
+  .phase-seed   { color: #94a3b8; border-color: #475569; background: #1e293b; }
+  .phase-build  { color: #60a5fa; border-color: #1d4ed8; background: #1e3a5f; }
+  .phase-harden { color: #fbbf24; border-color: #92400e; background: #1c1a0a; }
+  .phase-ship   { color: #4ade80; border-color: #166534; background: #0a1a10; }
+
+  .badge-advances {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.06em;
+    padding: 2px 7px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--color-border);
+    color: var(--color-text-dim);
+    background: var(--color-surface-alt);
+  }
+
+  /* ── Severity badges ─────────────────────────────────────────────────────── */
+
+  .badge-sev {
+    font-family: var(--font-mono);
+    font-size: 8px;
+    letter-spacing: 0.1em;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    border: 1px solid transparent;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .sev-crit { color: #fca5a5; background: #450a0a; border-color: #dc2626; }
+  .sev-high { color: #fdba74; background: #431407; border-color: #ea580c; }
+  .sev-med  { color: #fde68a; background: #422006; border-color: #ca8a04; }
+  .sev-low  { color: var(--color-text-dim); background: var(--color-surface-alt); border-color: var(--color-border); }
+
+  /* ── Blocker cards ───────────────────────────────────────────────────────── */
+
+  .op-blocker-card {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .op-blocker-header {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+
+  .op-blocker-text {
+    font-size: var(--text-xs);
+    color: var(--color-red);
+    line-height: 1.5;
+    flex: 1;
+  }
+
+  .op-blocker-since {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--color-text-dim);
+    white-space: nowrap;
+  }
+
+  .op-blocker-unblock {
+    margin: 0 0 0 calc(var(--space-3) + 6px + var(--space-2)); /* indent under severity badge */
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    line-height: 1.5;
+  }
+
+  /* ── Objective prose ─────────────────────────────────────────────────────── */
+
+  .op-objective {
+    margin: 0;
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-style: italic;
+    line-height: 1.5;
+    border-left: 2px solid var(--color-border);
+    padding-left: var(--space-3);
+  }
+
+  /* ── Shell badge ─────────────────────────────────────────────────────────── */
+
+  .badge-shell {
+    font-family: var(--font-mono);
+    font-size: 8px;
+    letter-spacing: 0.1em;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    border: 1px solid transparent;
+    white-space: nowrap;
+    flex-shrink: 0;
+    align-self: flex-start;
+    margin-top: 4px; /* optical align with code block */
+  }
+  .shell-bash { color: #86efac; background: #052e16; border-color: #166534; }
+  .shell-ps1  { color: #93c5fd; background: #1e3a5f; border-color: #1d4ed8; }
+  .shell-ssh  { color: #d8b4fe; background: #2e1065; border-color: #7c3aed; }
+
+  /* ── SHA display ─────────────────────────────────────────────────────────── */
+
+  .op-sha {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-dim);
+  }
+
+  /* ── Remote trees ────────────────────────────────────────────────────────── */
+
+  .op-remote-trees {
+    margin-top: var(--space-2);
+    border-top: 1px solid var(--color-border);
+    padding-top: var(--space-2);
+  }
+
+  .op-tree-list {
+    margin: var(--space-1) 0 0;
+    padding-left: var(--space-4);
+    list-style: disc;
+  }
+
+  .op-tree-list li {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    line-height: 1.6;
+  }
+
+  .op-tree-branch {
+    color: var(--color-text-dim);
+    margin-left: var(--space-1);
+  }
+
+  /* ── Problem / Solution sections ─────────────────────────────────────────── */
+
+  .prose-sections {
+    margin: var(--space-3) 0 var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .prose-section {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .prose-section > summary {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-text-dim);
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .prose-section > summary:hover { color: var(--color-text-muted); }
+
+  .prose-section > p {
+    margin: var(--space-2) 0 0;
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    line-height: 1.6;
+  }
+</style>
