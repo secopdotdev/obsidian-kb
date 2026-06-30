@@ -1,6 +1,7 @@
 // src/content.config.ts  (Astro 6 Content Layer API — NOT src/content/config.ts)
 import { defineCollection, z } from 'astro:content';
 import { glob } from 'astro/loaders';
+import { pathToFileURL } from 'node:url';
 
 // ---------------------------------------------------------------------------
 // Schema mirrors §5 of 01-kb-architecture.md exactly.
@@ -160,14 +161,20 @@ const noteSchema = z
   })
   .catchall(z.unknown());
 
-// App lives at knowledge-base/web/; vault root is one level up (`..`).
+// App lives at <vault>/web/; vault root is one level up (`..`).
 // Override with KB_VAULT (Docker build sets KB_VAULT=/vault and COPYs the corpus there).
 const VAULT = process.env.KB_VAULT ?? '..';
+
+// Astro 6's glob loader runs fileURLToPath() on `base`, so an absolute path
+// (the normal KB_VAULT case, e.g. /vault or C:\repos\kb) must be a file:// URL.
+// Relative paths resolve against the project root and pass through unchanged.
+const isAbsolute = VAULT.startsWith('/') || /^[A-Za-z]:[\\/]/.test(VAULT);
+const base = isAbsolute ? pathToFileURL(VAULT.replace(/\\/g, '/').replace(/\/?$/, '/')) : VAULT;
 
 export const collections = {
   notes: defineCollection({
     loader: glob({
-      base: VAULT,
+      base,
       pattern: ['**/*.md', '!**/_*/**', '!**/.obsidian/**', '!_*', '!web/**'],
     }),
     schema: noteSchema,
